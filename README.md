@@ -105,6 +105,27 @@ All env overrides are listed at the top of `bin/claude-local`.
 - Isolation: `CLAUDE_LOCAL_OFFLINE=1` (default) points HTTPS_PROXY at a dead port with localhost bypassed.
   Project-level CLAUDE.md files still load, by design.
 
+## Backend measurements (2026-09-05, upstream llama.cpp 6a1a922d2 vs Ollama 0.33.3, same GGUF, q8_0 KV, flash attention, -b/-ub 2048)
+
+Microbench (`bench/microbench.py`, cold prompt, temperature 0, medians of 3; raw rows in `bench/results/micro/`):
+
+| config | 2.7K prefill / decode | 10K prefill / decode | 30K prefill / decode | 100K prefill / decode | warm turn wall 10K / 30K |
+|---|---|---|---|---|---|
+| Ollama Vulkan (was default) | 1106 / 72.9 | 768 / 59.7 | 402 / 41.9 | 138 / 8.2 | 2.3s / 3.4s |
+| upstream Vulkan | 1213 / 77.3 | 952 / 62.5 | 561 / 43.1 | 226 / 22.5 | 2.2s / 3.1s |
+| upstream HIP (ROCm 7.14) | 1525 / 56.9 | 1289 / 41.3 | 762 / 22.6 | 302 / 7.6 | 3.2s / 7.0s |
+| upstream Vulkan, f16 KV | 1217 / 77.1 | 719 / 57.9 | 281 / 32.4 | - | 2.3s / 5.1s |
+| upstream Vulkan + draft speculation (n_max 3) | 747 / 24.7 | 699 / 26.5 | - | - | 7.1s / 14.2s |
+| upstream Vulkan + ngram-cache | 1216 / 40.8 | 954 / 26.0 | - | - | 3.7s / 7.3s |
+
+(prefill and decode in tok/s; "warm turn" = cached prefix plus a few new tokens and 128 output tokens, the shape of a Claude Code turn)
+
+- **Upstream Vulkan beats Ollama's Vulkan everywhere**: +10% to +64% prefill, equal-or-better decode, and 22.5 vs 8.2 tok/s decode at 100K context. Newer kernels, same backend.
+- **HIP prefills fastest but decodes slowest**, and its decode collapses with context (7.6 tok/s at 100K). Claude turns are decode-dominated, so Vulkan wins the per-turn cost at every depth; HIP is the choice only for prefill-bound work. Both backends lose ~90% of prefill throughput between depth 0 and 100K in llama-bench, so that cliff is the hardware's attention cost, not a HIP regression.
+- **q8_0 KV cache is faster than f16 here** (30K: 2x prefill, +33% decode): attention is bandwidth-bound and the smaller cache wins. Keep q8_0.
+- **Speculative decoding loses on this iGPU** despite 55% draft acceptance (2.6 tokens per verify step): the batched verify costs more than the tokens it saves. Draft n_max 8/16 and both ngram modes are worse still. Off by default; the env file documents how to re-try on other hardware.
+- Ollama's bundled ROCm 7.2 segfaults on this Linux 7.0 kernel; the upstream HIP build links the system ROCm 7.14 and runs.
+
 ## Known unknowns
 
 - 2 of 81 benchmark runs had the model emit a malformed native XML tool call as text on turn 1.
