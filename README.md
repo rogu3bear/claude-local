@@ -4,7 +4,11 @@ Run Claude Code against a local model server (Ollama) from a fully isolated
 config directory, with the harness fitted to a small model and every knob
 backed by a benchmark number.
 
-    make install            # symlinks into ~/.local/bin and ~/.claude-local
+    git clone <this repo> ~/dev/claude-local && ~/dev/claude-local/bootstrap.sh
+                            # fresh machine -> working claude-local: deps, user-local Ollama,
+                            # systemd user service, model pull, symlinks, server drop-in, smoke turn.
+                            # Idempotent; --dry-run shows the plan; no sudo.
+    make install            # symlinks only (already-bootstrapped machine)
     claude-local            # pick a model, go
     make check              # lint + one smoke turn through launcher and proxy
     make check-interactive  # pty-driven full session (picker, statusline, Ctrl-C, exit menu)
@@ -22,6 +26,7 @@ backed by a benchmark number.
 | `config/picker.py` | model menu, or non-interactive via `CLAUDE_LOCAL_MODEL` |
 | `config/system_prompt.md` | operator prompt appended to Claude's built-in prompt (`{{MODEL}}` templated) |
 | `config/system_prompt_compact.md` | replacement prompt for `CLAUDE_LOCAL_PROMPT=replace`; faster, less careful |
+| `bootstrap.sh` | single entry point for a fresh machine (see top); `systemd/ollama.service` is the unit template it installs (AMD Vulkan profile) |
 | `systemd/10-claude-local.conf` | Ollama drop-in: 128K context, q8_0 KV, one slot, 2h keep-alive |
 | `bench/` | 8 fixed tasks, runner, comparison; results from 2026-09-05 in `bench/results` |
 | `test/` | smoke turn and pty-driven interactive session |
