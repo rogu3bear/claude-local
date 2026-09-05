@@ -5,7 +5,7 @@
 #   ./bootstrap.sh [--dry-run] [--no-smoke] [--model NAME] [--port N]
 #                  [--gpu amd-vulkan|amd-rocm|nvidia|cpu]   (default amd-vulkan)
 #                  [--backend ollama|llamaserver]           (default ollama)
-#                  [--llama-cpp DIR] [--device ROCm0|Vulkan0] [--llama-port N]
+#                  [--llama-cpp DIR] [--device Vulkan0|ROCm0] [--llama-port N]
 #                  [--model-gguf PATH] [--draft URL|PATH|none|default]  (default none)
 #
 # Steps (each idempotent; re-running is safe and does not restart a healthy server):
@@ -35,7 +35,7 @@ CONFIG="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
 [ -r "$CONFIG/env" ] && . "$CONFIG/env"
 MODEL="${CLAUDE_LOCAL_MODEL:-qwen3-coder:30b}"; PORT="${CLAUDE_LOCAL_PORT:-1234}"; PORT_EXPLICIT=0
 GPU="amd-vulkan"; DRY=0; SMOKE=1
-BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"; LLAMA_CPP_DIR="$HOME/ai/llama.cpp"; LLAMA_DEVICE="ROCm0"; LLAMA_PORT="${CLAUDE_LOCAL_LLAMASERVER_PORT:-1244}"
+BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"; LLAMA_CPP_DIR="$HOME/ai/llama.cpp"; LLAMA_DEVICE="Vulkan0"; LLAMA_PORT="${CLAUDE_LOCAL_LLAMASERVER_PORT:-1244}"
 MODEL_GGUF=""; DRAFT="none"; DRAFT_SIZE=639446688   # speculative decoding measured slower on gfx1151; opt in with --draft URL
 DRAFT_DEFAULT_URL="https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
 while [ $# -gt 0 ]; do

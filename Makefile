@@ -14,6 +14,6 @@ check-llama: lint   ## same, against llama-server.service (port from ~/.claude-l
 check-interactive:  ## full pty-driven session (picker, statusline, Ctrl-C, post-exit menu)
 	python3 test/interactive.py
 bench:              ## run the benchmark under LABEL (default: adhoc); extra claude flags via FLAGS
-	cd bench && CLAUDE_LOCAL_BACKEND=$${BACKEND:-ollama} ./run.sh --label $${LABEL:-adhoc} -- --append-system-prompt-file $(CURDIR)/config/system_prompt.md --exclude-dynamic-system-prompt-sections --autocompact 120832 --disallowedTools Agent $(FLAGS)
+	cd bench && CLAUDE_LOCAL_BACKEND=$${BACKEND:-ollama} ./run.sh --label $${LABEL:-adhoc} -- --append-system-prompt-file $(CURDIR)/config/system_prompt.md --exclude-dynamic-system-prompt-sections --autocompact 120832 --disallowedTools Agent,ReportFindings,TaskCreate,TaskUpdate,TaskList,TaskGet,WebFetch,WebSearch,NotebookEdit $(FLAGS)
 compare:            ## summarise benchmark results
 	bench/compare.py
