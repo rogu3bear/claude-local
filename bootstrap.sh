@@ -137,8 +137,10 @@ fi
 if [ "$DRY" = 1 ]; then echo "  would install drop-ins 10-claude-local.conf + 20-gpu.conf ($GPU), daemon-reload, enable + start, wait" >&2
 else
   D="$UNIT_DIR/ollama.service.d"; mkdir -p "$D"
-  cmp -s "$HERE/systemd/10-claude-local.conf" "$D/10-claude-local.conf" || cp "$HERE/systemd/10-claude-local.conf" "$D/"
-  cmp -s "$HERE/systemd/20-gpu-$GPU.conf" "$D/20-gpu.conf" || cp "$HERE/systemd/20-gpu-$GPU.conf" "$D/20-gpu.conf"
+  cmp -s "$HERE/systemd/10-claude-local.conf" "$D/10-claude-local.conf" \
+    || { cp "$HERE/systemd/10-claude-local.conf" "$D/"; say "updated drop-in $D/10-claude-local.conf"; }
+  cmp -s "$HERE/systemd/20-gpu-$GPU.conf" "$D/20-gpu.conf" \
+    || { cp "$HERE/systemd/20-gpu-$GPU.conf" "$D/20-gpu.conf"; say "updated drop-in $D/20-gpu.conf ($GPU)"; }
   systemctl --user daemon-reload
   systemctl --user enable ollama.service >/dev/null 2>&1 || warn "could not enable ollama.service (will not start at login)"
   systemctl --user is-active --quiet ollama.service || systemctl --user start ollama.service || die "ollama.service failed to start; see: journalctl --user -u ollama.service -e"
