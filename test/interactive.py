@@ -29,7 +29,7 @@ if orig is not None:   # pre-accept the trust dialog the way the dialog itself r
 os.chdir(repo)
 ANSI = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[=>]|\r')
 log = open(LOG_PATH, 'wb')
-env = {k: v for k, v in os.environ.items() if not k.startswith('CLAUDE')}
+env = {k: v for k, v in os.environ.items() if not k.startswith('CLAUDE') or k.startswith('CLAUDE_LOCAL')}
 env.update(TERM='xterm-256color', COLUMNS='140', LINES='40', CLAUDE_LOCAL_PROXY_DEBUG='1')
 m, s = pty.openpty()
 fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 140, 0, 0))

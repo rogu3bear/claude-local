@@ -12,7 +12,8 @@
 #   CLAUDE_LOCAL_MODEL        model name to use directly, skipping the menu
 #   CLAUDE_LOCAL_PORT         server port (default 1234)
 #   CLAUDE_LOCAL_CONFIG       isolated config dir (default ~/.claude-local)
-#   CLAUDE_LOCAL_BACKEND      backend adapter name (default ollama)
+#   CLAUDE_LOCAL_BACKEND      backend adapter name: ollama (default) | llamaserver
+#                             (the env file maps each backend to its port: 1234 / 1244)
 #   CLAUDE_LOCAL_PROXY        1 = route through the usage proxy (default 1), 0 = direct
 #   CLAUDE_LOCAL_PROXY_PORT   first proxy port to try (default PORT+1; next free one is used)
 #   CLAUDE_LOCAL_MAX_OUTPUT   max output tokens per turn (default 8192; Claude's own default is 32000)
@@ -157,7 +158,7 @@ else
 fi
 if [ -n "$AUTOCOMPACT" ]; then
   if [ "$AUTOCOMPACT" -lt 100000 ] 2>/dev/null; then
-    warn "context ${CTX:-?} leaves only ${AUTOCOMPACT} for the prompt after ${MAX_OUTPUT} output tokens; Claude's autocompact floor is 100000, so long sessions may be truncated. Raise OLLAMA_CONTEXT_LENGTH to >= $(( 100000 + MAX_OUTPUT + 2048 )) or lower CLAUDE_LOCAL_MAX_OUTPUT."
+    warn "context ${CTX:-?} leaves only ${AUTOCOMPACT} for the prompt after ${MAX_OUTPUT} output tokens; Claude's autocompact floor is 100000, so long sessions may be truncated. Raise the server context (OLLAMA_CONTEXT_LENGTH / LLAMA_ARG_CTX_SIZE) to >= $(( 100000 + MAX_OUTPUT + 2048 )) or lower CLAUDE_LOCAL_MAX_OUTPUT."
     AUTOCOMPACT=100000
   fi
   CLAUDE_FLAGS+=(--autocompact "$AUTOCOMPACT")
@@ -200,7 +201,8 @@ if [ "$USE_PROXY" = "1" ]; then
     sleep 0.15
   done
   BOUND=$(cat "$SESSION_DIR/proxy_port" 2>/dev/null || true)
-  if [ -n "$BOUND" ] && curl -s --max-time 2 -o /dev/null "http://localhost:${BOUND}/api/tags"; then
+  PROBE=$(backend_probe_path 2>/dev/null || echo /api/tags)
+  if [ -n "$BOUND" ] && curl -sf --max-time 2 -o /dev/null "http://localhost:${BOUND}${PROBE}"; then
     PROXY_PORT="$BOUND"
     CLAUDE_BASE_URL="http://localhost:${PROXY_PORT}"
   else
@@ -241,7 +243,8 @@ if [ -n "$still_loaded" ]; then
     u|U|unload)
       for m in ${still_loaded//,/ }; do say "Unloading ${m}..."; backend_unload "$m"; done
       remaining=$(backend_loaded_names)
-      if [ -n "$remaining" ]; then warn "Still loaded: ${remaining}"; else say "Memory freed."; fi ;;
+      if declare -F backend_unload_keeps_model >/dev/null && backend_unload_keeps_model; then say "Prompt cache saved; server left running (CLAUDE_LOCAL_LLAMA_STOP_ON_UNLOAD=1 to stop it)."
+      elif [ -n "$remaining" ]; then warn "Still loaded: ${remaining}"; else say "Memory freed."; fi ;;
     a|A|another)
       PICK2=$(CLAUDE_LOCAL_MODEL="" MODELS_JSON_PATH="$MODELS_JSON_PATH" \
               LOADED_MODELS="$(backend_loaded_names)" python3 "$CONFIG_DIR/picker.py")

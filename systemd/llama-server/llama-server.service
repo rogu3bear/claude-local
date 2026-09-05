@@ -1,0 +1,18 @@
+[Unit]
+Description=llama.cpp llama-server (claude-local)
+
+[Service]
+Type=simple
+# One-line switches (device/build, model, draft) live in the env file; tuning lives in drop-ins.
+EnvironmentFile=%h/.claude-local/llama-server.env
+# systemd cannot expand a variable as the program itself, so a fixed wrapper maps
+# LLAMA_DEVICE -> build dir and execs the real binary. Other settings are LLAMA_ARG_* env.
+ExecStart=%h/.local/bin/llama-server-run
+Environment=LLAMA_ARG_HOST=127.0.0.1
+Environment=LLAMA_ARG_PORT=__PORT__
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

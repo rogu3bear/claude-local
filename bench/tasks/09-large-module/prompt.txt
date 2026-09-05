@@ -1,0 +1,1 @@
+`python3 test_inventory.py` fails. Fix the bug in inventory.py so it prints ALL PASS. Do not modify the test file. Do not rewrite unrelated functions; make the smallest correct change.

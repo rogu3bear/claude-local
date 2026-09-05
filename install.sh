@@ -3,6 +3,7 @@
 #   ~/.local/bin/claude-local      -> bin/claude-local
 #   ~/.local/bin/ollama            -> wrapper: sets OLLAMA_HOST from ~/.claude-local/env, execs ~/.local/ollama/bin/ollama
 #   ~/.claude-local/<file>         -> config/<file>   (adapters, picker, proxy, statusline, prompts, settings)
+#   ~/.local/bin/llama-server-run  -> bin/llama-server-run  (ExecStart of llama-server.service)
 #   ~/.claude-local/bench          -> bench/
 #   ~/.config/systemd/user/ollama.service.d/10-claude-local.conf   (copied if changed)
 #   ~/.config/systemd/user/ollama.service.d/20-gpu.conf            (copied from systemd/20-gpu-$GPU.conf if GPU given)
@@ -22,6 +23,7 @@ link() { # $1 = target, $2 = link path
 }
 mkdir -p "$BIN" "$CONFIG"
 link "$HERE/bin/claude-local" "$BIN/claude-local"
+link "$HERE/bin/llama-server-run" "$BIN/llama-server-run"
 for f in backend-ollama.sh backend-llamaserver.sh picker.py proxy.py statusline.sh system_prompt.md system_prompt_compact.md settings.json; do
   link "$HERE/config/$f" "$CONFIG/$f"
 done
@@ -32,7 +34,7 @@ if [ -x "$HOME/.local/ollama/bin/ollama" ] && [ ! -e "$BIN/ollama" -o -L "$BIN/o
 #!/usr/bin/env bash
 # claude-local ollama wrapper: talk to the user-local server on its configured port.
 [ -r "${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}/env" ] && . "${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}/env"
-export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:${CLAUDE_LOCAL_PORT:-1234}}"
+export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:${CLAUDE_LOCAL_OLLAMA_PORT:-${CLAUDE_LOCAL_PORT:-1234}}}"
 exec "$HOME/.local/ollama/bin/ollama" "$@"
 WRAP
     chmod +x "$BIN/ollama"; echo "wrote $BIN/ollama (wrapper)" >&2
@@ -51,6 +53,12 @@ if systemctl --user cat ollama.service >/dev/null 2>&1; then
     fi
   fi
   [ "$changed" = 1 ] && systemctl --user daemon-reload
+fi
+if systemctl --user cat llama-server.service >/dev/null 2>&1; then
+  D="$HOME/.config/systemd/user/llama-server.service.d"; mkdir -p "$D"
+  if ! cmp -s "$HERE/systemd/llama-server/10-claude-local.conf" "$D/10-claude-local.conf"; then
+    cp "$HERE/systemd/llama-server/10-claude-local.conf" "$D/"; systemctl --user daemon-reload; echo "installed $D/10-claude-local.conf" >&2; echo "LLAMA_DROPIN_CHANGED"
+  fi
 fi
 if [ "$CONFIG" != "$HOME/.claude-local" ]; then
   echo "note: set statusLine.command in $CONFIG/settings.json to $CONFIG/statusline.sh" >&2

@@ -42,8 +42,14 @@ mkdir -p "$OUT" "$WORK"
 ROWS="$RES/$LABEL.jsonl"
 
 # Server-side snapshot so a row is self-describing.
-ctx_len=$(curl -s --max-time 3 "$BASE_URL/api/ps" | jq -r --arg m "$MODEL" '[.models[]|select(.name==$m)][0].context_length // empty' 2>/dev/null)
-server_env=$(systemctl --user show ollama.service -p Environment 2>/dev/null | sed 's/^Environment=//' | tr ' ' '\n' | grep -E '^OLLAMA_(CONTEXT_LENGTH|KV_CACHE_TYPE|NUM_PARALLEL|FLASH_ATTENTION)=' | paste -sd' ')
+BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"
+. "$CONFIG_DIR/backend-${BACKEND}.sh"
+ctx_len=$(backend_context_length "$MODEL")
+if [ "$BACKEND" = ollama ]; then
+  server_env=$(systemctl --user show ollama.service -p Environment 2>/dev/null | sed 's/^Environment=//' | tr ' ' '\n' | grep -E '^OLLAMA_(CONTEXT_LENGTH|KV_CACHE_TYPE|NUM_PARALLEL|FLASH_ATTENTION)=' | paste -sd' ')
+else
+  server_env=$( { systemctl --user show llama-server.service -p Environment 2>/dev/null | sed 's/^Environment=//' | tr ' ' '\n' | grep -E '^LLAMA_ARG_(CTX_SIZE|CACHE_TYPE_K|UBATCH)='; grep -E '^LLAMA_(DEVICE|ARG_SPEC_TYPE|ARG_SPEC_DRAFT_N_MAX)=' "$CONFIG_DIR/llama-server.env" 2>/dev/null; } | paste -sd' ')
+fi
 flags_str=$(printf '%q ' "${EXTRA[@]}")
 
 # Environment for the child claude: isolated config, local server, no nesting markers.
@@ -59,7 +65,7 @@ run_claude() { # cwd is the task dir; args: prompt
 }
 
 if [ -n "$TASKS" ]; then task_list=${TASKS//,/ }; else task_list=$(ls "$HERE/tasks"); fi
-echo "[bench] label=$LABEL model=$MODEL ctx=${ctx_len:-?} server[$server_env] flags[$flags_str]" >&2
+echo "[bench] label=$LABEL backend=$BACKEND model=$MODEL ctx=${ctx_len:-?} server[$server_env] flags[$flags_str]" >&2
 total=0; passed=0
 for task in $task_list; do
   tdir="$HERE/tasks/$task"; [ -d "$tdir" ] || { echo "no such task $task" >&2; continue; }
@@ -78,9 +84,9 @@ for task in $task_list; do
     row=$(jq -c --arg label "$LABEL" --arg task "$task" --argjson rep "$rep" --argjson ok "$ok" \
              --argjson wall "$wall" --argjson rc "$rc" --argjson timed_out "$timed_out" \
              --arg model "$MODEL" --arg ctx "${ctx_len:-}" --arg server "$server_env" --arg flags "$flags_str" \
-             --arg notes "$NOTES" --arg ts "$(date -Is)" '
+             --arg notes "$NOTES" --arg ts "$(date -Is)" --arg backend "$BACKEND" '
       def n(x): (x // 0);
-      {label:$label, task:$task, rep:$rep, ok:$ok, wall_s:$wall, rc:$rc, timed_out:$timed_out,
+      {label:$label, backend:$backend, task:$task, rep:$rep, ok:$ok, wall_s:$wall, rc:$rc, timed_out:$timed_out,
        num_turns:n(.num_turns), duration_ms:n(.duration_ms), duration_api_ms:n(.duration_api_ms),
        input:n(.usage.input_tokens), cache_read:n(.usage.cache_read_input_tokens),
        cache_creation:n(.usage.cache_creation_input_tokens), output:n(.usage.output_tokens),

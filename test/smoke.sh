@@ -2,8 +2,12 @@
 # One non-interactive turn through the installed launcher and proxy.
 # Checks: result text, proxy row written, autocompact/offline banner. ~30s warm.
 set -uo pipefail
-MODEL="${1:-${CLAUDE_LOCAL_MODEL:-qwen3-coder:30b}}"
 CONFIG="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
+[ -r "$CONFIG/env" ] && . "$CONFIG/env"
+BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"; PORT="${CLAUDE_LOCAL_PORT:-1234}"
+MODEL="${1:-${CLAUDE_LOCAL_MODEL:-}}"
+if [ -z "$MODEL" ] && [ "$BACKEND" = llamaserver ]; then MODEL=$(curl -sf "http://127.0.0.1:${PORT}/v1/models" | jq -r '.data[0].id // empty'); fi
+MODEL="${MODEL:-qwen3-coder:30b}"
 export PATH="$HOME/.local/bin:$PATH"
 tmp=$(mktemp -d); cd "$tmp"
 out=$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID \
@@ -16,6 +20,7 @@ result=$(printf '%s' "$out" | jq -r '.result // empty' 2>/dev/null)
 sess=$(ls -dt "$CONFIG"/run/*/ 2>/dev/null | head -1)
 rows=$(wc -l < "$sess/usage.jsonl" 2>/dev/null || echo 0)
 port=$(cat "$sess/proxy_port" 2>/dev/null || echo none)
+echo "backend: $BACKEND port=$PORT model=$MODEL"
 echo "banner : ${banner:-<none>}"
 echo "result : ${result:-<none>}  (exit $rc)"
 echo "proxy  : port=$port usage_rows=$rows"

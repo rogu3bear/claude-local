@@ -12,7 +12,9 @@
 #   backend_load M             -> load/pin M (long keep-alive); blocks until loaded
 #   backend_unload M           -> evict M from memory
 
-backend_up() { curl -s --max-time 3 -o /dev/null "${BASE_URL}/api/tags"; }
+backend_probe_path() { echo /api/tags; }
+
+backend_up() { curl -sf --max-time 3 -o /dev/null "${BASE_URL}/api/tags"; }
 
 backend_start() {
   if systemctl --user cat ollama.service >/dev/null 2>&1; then

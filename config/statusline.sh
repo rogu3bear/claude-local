@@ -67,9 +67,15 @@ else
 fi
 
 # Server status + loaded model. Three states: online+model, online+empty, offline.
-model=""
-resp=$(curl -s --max-time 1 "http://localhost:${PORT}/api/ps" 2>/dev/null)
-[ -n "$resp" ] && model=$(printf '%s' "$resp" | jq -r '.models[0].name // empty' 2>/dev/null)
+model=""; resp=""
+BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"
+if [ "$BACKEND" = ollama ]; then
+  resp=$(curl -s --max-time 1 "http://localhost:${PORT}/api/ps" 2>/dev/null)
+  [ -n "$resp" ] && model=$(printf '%s' "$resp" | jq -r '.models[0].name // empty' 2>/dev/null)
+else
+  resp=$(curl -sf --max-time 1 "http://localhost:${PORT}/v1/models" 2>/dev/null)
+  [ -n "$resp" ] && model=$(printf '%s' "$resp" | jq -r '.data[0].id // empty' 2>/dev/null)
+fi
 session_model=$(cat "$SESSION_DIR/session_model" 2>/dev/null || echo "")
 if [ -n "$model" ]; then
   if [ -n "$session_model" ] && [ "$model" != "$session_model" ]; then
@@ -103,7 +109,10 @@ if [ -n "$resp" ]; then
     [ -r "$f" ] && { gbusy=$(cat "$f" 2>/dev/null); break; }
   done
   [ "${gbusy:-0}" -ge 20 ] 2>/dev/null && thinking=1
-  lls=$(pgrep -f "llama-server" | head -1)
+  # the runner that owns our port (Ollama's runner and our llama-server both match by name)
+  lls=$(ss -ltnp 2>/dev/null | awk -v p=":${PORT}" '$4 ~ p"$" {print $NF}' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+  [ -n "$lls" ] && [ "$BACKEND" = ollama ] && lls=$(pgrep -P "$lls" -f llama-server | head -1)
+  [ -n "$lls" ] || lls=$(pgrep -f "llama-server" | head -1)
   if [ -n "$lls" ]; then
     mcs=$(awk -v p="$lls" '$1==p { print ($14+$15)*10 }' /proc/"$lls"/stat 2>/dev/null)
     if [ -n "$mcs" ]; then
@@ -204,7 +213,7 @@ if [ -r /proc/stat ]; then
   [ -n "$hot" ] && line4+="  ${RED}hot:${hot}${RESET}"
 fi
 
-ghost=$(printf '%s' "$resp" | jq -r '.models[0].size_vram // 0' 2>/dev/null)
+ghost=$(printf '%s' "$resp" | jq -r '.models[0].size_vram // .data[0].meta.size // 0' 2>/dev/null)
 gtt=$(cat /sys/class/drm/card*/device/mem_info_gtt_total 2>/dev/null | head -1 | tr -d ' ')
 if [ -n "$ghost" ] && [ -n "$gtt" ] && [ "${ghost:-0}" -gt 0 ] 2>/dev/null && [ "${gtt:-0}" -gt 0 ]; then
   gp=$(( ghost*100/gtt )); [ "$gp" -gt 100 ] && gp=100

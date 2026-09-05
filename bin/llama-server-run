@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# claude-local: ExecStart wrapper for llama-server.service.
+# Maps LLAMA_DEVICE to a build dir and execs llama-server; every other setting
+# arrives as LLAMA_ARG_* environment (unit drop-ins + ~/.claude-local/llama-server.env).
+set -euo pipefail
+die() { echo "[llama-server-run] $*" >&2; exit 1; }
+: "${LLAMA_DEVICE:?set LLAMA_DEVICE (ROCm0|Vulkan0) in ~/.claude-local/llama-server.env}"
+: "${LLAMA_ARG_MODEL:?set LLAMA_ARG_MODEL=<gguf path> in ~/.claude-local/llama-server.env}"
+LLAMA_CPP_DIR="${LLAMA_CPP_DIR:-$HOME/ai/llama.cpp}"
+case "$LLAMA_DEVICE" in
+  ROCm*)   build=build-hip ;;
+  Vulkan*) build=build-vulkan
+           export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/radeon_icd.json}" AMD_VULKAN_ICD="${AMD_VULKAN_ICD:-RADV}" ;;
+  CPU*)    build="${LLAMA_CPU_BUILD:-build-vulkan}" ;;
+  *)       die "unknown LLAMA_DEVICE=$LLAMA_DEVICE (ROCm0|Vulkan0|CPU)" ;;
+esac
+BIN="$LLAMA_CPP_DIR/$build/bin/llama-server"
+[ -x "$BIN" ] || die "no llama-server at $BIN; build it (see README: llama.cpp build recipe)"
+[ -n "${LLAMA_LD_LIBRARY_PATH:-}" ] && export LD_LIBRARY_PATH="$LLAMA_LD_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if ldd "$BIN" 2>/dev/null | grep -q 'not found'; then
+  die "$BIN has unresolved libraries: $(ldd "$BIN" | grep 'not found' | tr -s ' ' | paste -sd';'); set LLAMA_LD_LIBRARY_PATH"
+fi
+[ -r "$LLAMA_ARG_MODEL" ] || die "model not readable: $LLAMA_ARG_MODEL"
+SLOTS="${LLAMA_SLOT_DIR:-$HOME/.claude-local/slots}"; mkdir -p "$SLOTS"
+echo "[llama-server-run] device=$LLAMA_DEVICE build=$build model=$(basename "$LLAMA_ARG_MODEL") alias=${LLAMA_ARG_ALIAS:-} spec=${LLAMA_ARG_SPEC_TYPE:-none} draft=${LLAMA_ARG_SPEC_DRAFT_MODEL:+$(basename "$LLAMA_ARG_SPEC_DRAFT_MODEL")}" >&2
+# shellcheck disable=SC2086  # LLAMA_EXTRA_ARGS is deliberately word-split
+exec "$BIN" -dev "$LLAMA_DEVICE" -np "${LLAMA_ARG_N_PARALLEL:-1}" --slot-save-path "$SLOTS" --no-webui ${LLAMA_EXTRA_ARGS:-}

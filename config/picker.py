@@ -46,7 +46,7 @@ def main() -> None:
         print(f"{'USE' if n.lower() in loaded else 'LOAD'}|{n}")
 
     if not models:
-        print("No models installed. Pull one with:  ollama pull <model>", file=sys.stderr)
+        print("No models available. Ollama: `ollama pull <model>`; llama-server: set LLAMA_ARG_MODEL in ~/.claude-local/llama-server.env", file=sys.stderr)
         print("ERR:no models found")
         sys.exit(2)
 
