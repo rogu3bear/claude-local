@@ -34,9 +34,13 @@
 
 set -uo pipefail
 
-PORT="${CLAUDE_LOCAL_PORT:-1234}"
-BASE_URL="http://localhost:${PORT}"
 CONFIG_DIR="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
+# Persisted defaults written by bootstrap (e.g. CLAUDE_LOCAL_PORT). Explicit
+# environment variables win: the file only sets what is still unset.
+[ -r "$CONFIG_DIR/env" ] && . "$CONFIG_DIR/env"
+PORT="${CLAUDE_LOCAL_PORT:-1234}"
+export CLAUDE_LOCAL_PORT="$PORT"          # statusline and bench read it
+BASE_URL="http://localhost:${PORT}"
 BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"
 USE_PROXY="${CLAUDE_LOCAL_PROXY:-1}"
 PROXY_PORT="${CLAUDE_LOCAL_PROXY_PORT:-$((PORT + 1))}"

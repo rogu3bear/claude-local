@@ -7,7 +7,8 @@ backed by a benchmark number.
     git clone <this repo> ~/dev/claude-local && ~/dev/claude-local/bootstrap.sh
                             # fresh machine -> working claude-local: deps, user-local Ollama,
                             # systemd user service, model pull, symlinks, server drop-in, smoke turn.
-                            # Idempotent; --dry-run shows the plan; no sudo.
+                            # Idempotent (no server restart unless the drop-in env changed); --dry-run shows the plan; no sudo.
+                            # The port is persisted in ~/.claude-local/env; `ollama` on PATH is a wrapper that targets it.
     make install            # symlinks only (already-bootstrapped machine)
     claude-local            # pick a model, go
     make check              # lint + one smoke turn through launcher and proxy
@@ -26,8 +27,10 @@ backed by a benchmark number.
 | `config/picker.py` | model menu, or non-interactive via `CLAUDE_LOCAL_MODEL` |
 | `config/system_prompt.md` | operator prompt appended to Claude's built-in prompt (`{{MODEL}}` templated) |
 | `config/system_prompt_compact.md` | replacement prompt for `CLAUDE_LOCAL_PROMPT=replace`; faster, less careful |
-| `bootstrap.sh` | single entry point for a fresh machine (see top); `systemd/ollama.service` is the unit template it installs (AMD Vulkan profile) |
-| `systemd/10-claude-local.conf` | Ollama drop-in: 128K context, q8_0 KV, one slot, 2h keep-alive |
+| `bootstrap.sh` | single entry point for a fresh machine (see top). `--gpu amd-vulkan\|amd-rocm\|nvidia\|cpu` picks a profile; an existing user unit is adopted (its port and binary), never overwritten |
+| `systemd/ollama.service` | generic unit template (no GPU or tuning env; those are drop-ins) |
+| `systemd/10-claude-local.conf` | drop-in: flash attention, 128K context, q8_0 KV, one slot, 2h keep-alive. Flash attention lives here because q8_0 KV silently falls back to f16 without it |
+| `systemd/20-gpu-*.conf` | GPU profile drop-ins; bootstrap installs the chosen one as `20-gpu.conf` |
 | `bench/` | 8 fixed tasks, runner, comparison; results from 2026-09-05 in `bench/results` |
 | `test/` | smoke turn and pty-driven interactive session |
 

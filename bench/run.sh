@@ -22,6 +22,7 @@
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CONFIG_DIR="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
+[ -r "$CONFIG_DIR/env" ] && . "$CONFIG_DIR/env"
 LABEL=""; MODEL="${CLAUDE_LOCAL_MODEL:-qwen3-coder:30b}"; PORT="${CLAUDE_LOCAL_PORT:-1234}"
 TASKS=""; REPEAT=1; TIMEOUT=420; MAXTURNS=30; NOTES=""
 while [ $# -gt 0 ]; do

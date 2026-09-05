@@ -23,7 +23,7 @@ backend_start() {
 
 backend_start_hint() {
   echo "  Start it with:  systemctl --user start ollama.service" >&2
-  echo "  Or run:         OLLAMA_HOST=127.0.0.1:${PORT} ollama serve" >&2
+  echo "  Or run:         ollama serve        (~/.local/bin/ollama wrapper sets OLLAMA_HOST)" >&2
 }
 
 backend_models_json() { curl -s --max-time 10 "${BASE_URL}/api/tags" > "$1"; }

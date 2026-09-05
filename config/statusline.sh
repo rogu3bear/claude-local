@@ -24,6 +24,7 @@ CYAN=$'\033[36m'; MAGENTA=$'\033[35m'
 
 CONFIG_DIR="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
 SESSION_DIR="${CLAUDE_LOCAL_SESSION_DIR:-$CONFIG_DIR}"
+[ -r "$CONFIG_DIR/env" ] && . "$CONFIG_DIR/env"
 PORT="${CLAUDE_LOCAL_PORT:-1234}"
 STATE="$SESSION_DIR/statusline.state"
 NCPU=$(nproc 2>/dev/null || echo 8)

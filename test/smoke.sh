@@ -4,6 +4,7 @@
 set -uo pipefail
 MODEL="${1:-${CLAUDE_LOCAL_MODEL:-qwen3-coder:30b}}"
 CONFIG="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
+export PATH="$HOME/.local/bin:$PATH"
 tmp=$(mktemp -d); cd "$tmp"
 out=$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID \
          -u CLAUDE_PID -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN -u CLAUDE_CODE_BRIDGE_SESSION_ID \
@@ -23,5 +24,4 @@ ok=1
 printf '%s' "$result" | grep -q SMOKEOK || ok=0
 [ "$rows" -ge 1 ] || ok=0
 printf '%s' "$banner" | grep -q 'autocompact=[0-9]' || ok=0
-rm -rf "$tmp"
-if [ "$ok" = 1 ]; then echo "SMOKE PASS"; else echo "SMOKE FAIL (stderr follows)"; cat "$tmp/err" 2>/dev/null; exit 1; fi
+if [ "$ok" = 1 ]; then echo "SMOKE PASS"; rm -rf "$tmp"; else echo "SMOKE FAIL (stderr follows)"; cat "$tmp/err"; rm -rf "$tmp"; exit 1; fi

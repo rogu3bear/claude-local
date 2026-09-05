@@ -1,6 +1,6 @@
 .PHONY: bootstrap install check check-interactive bench compare lint
-bootstrap:          ## fresh machine -> working claude-local (deps, ollama, service, model, symlinks, smoke)
-	./bootstrap.sh
+bootstrap:          ## fresh machine -> working claude-local; flags via ARGS='--gpu cpu --dry-run'
+	./bootstrap.sh $(ARGS)
 install:            ## symlink into ~/.local/bin and ~/.claude-local
 	./install.sh
 lint:               ## syntax-check every script
