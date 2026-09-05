@@ -62,7 +62,7 @@ if expect(r'trust\s*this\s*folder', 30):
     send('\x1b[B'); send('\r'); print('      accepted workspace trust dialog')
 r.append(step('claude TUI ready',              expect(r'manual\s*mode|for\s*agents|/effort|shortcuts', 120)))
 time.sleep(4); send('Reply with exactly the word PTYOK and nothing else.'); time.sleep(1); send('\r')
-r.append(step('model answered (assistant output)', expect(r'●\s*PTYOK', 150)))
+r.append(step('model answered (assistant output)', expect(r'PTYOK(?!\s*and)', 150)))
 r.append(step('statusline shows proxy stats',  expect(r'tok/s|cache\s*\d+%', 40)))
 r.append(step('context gauge uses 120K window', expect(r'/12[01]K', 30)))
 send('\x03'); r.append(step('first Ctrl-C prompts',        expect(r'Ctrl-C\s*again|again\s*to\s*exit', 10)))

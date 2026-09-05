@@ -72,6 +72,14 @@ def http_json(url, path, body, stream=True, timeout=3600):
                 yield json.loads(line)
             except ValueError:
                 continue
+    tail = buf.strip()                      # a non-streaming reply may end without a newline
+    if tail:
+        if tail.startswith(b"data:"):
+            tail = tail[5:].strip()
+        try:
+            yield json.loads(tail)
+        except ValueError:
+            pass
     conn.close()
 
 def tokenize_len(cal_url, text):

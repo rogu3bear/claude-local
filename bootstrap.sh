@@ -6,7 +6,7 @@
 #                  [--gpu amd-vulkan|amd-rocm|nvidia|cpu]   (default amd-vulkan)
 #                  [--backend ollama|llamaserver]           (default ollama)
 #                  [--llama-cpp DIR] [--device ROCm0|Vulkan0] [--llama-port N]
-#                  [--model-gguf PATH] [--draft URL|PATH|none]
+#                  [--model-gguf PATH] [--draft URL|PATH|none|default]  (default none)
 #
 # Steps (each idempotent; re-running is safe and does not restart a healthy server):
 #   1. deps      git curl jq python3 systemd tar zstd; node+npm (nvm if absent); claude CLI
@@ -22,7 +22,7 @@
 #   With --backend llamaserver an extra step installs llama-server.service (port 1244)
 #   from an existing upstream llama.cpp build (--llama-cpp DIR, default ~/ai/llama.cpp;
 #   the build recipe is printed if the binary is missing), resolves the GGUF from the
-#   Ollama manifest, downloads the Qwen3-0.6B draft model, writes
+#   Ollama manifest, optionally downloads a draft model (--draft default), writes
 #   ~/.claude-local/llama-server.env (adopted if present) and starts the unit.
 #   Ollama stays installed and untouched as the fallback.
 #
@@ -36,13 +36,14 @@ CONFIG="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
 MODEL="${CLAUDE_LOCAL_MODEL:-qwen3-coder:30b}"; PORT="${CLAUDE_LOCAL_PORT:-1234}"; PORT_EXPLICIT=0
 GPU="amd-vulkan"; DRY=0; SMOKE=1
 BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"; LLAMA_CPP_DIR="$HOME/ai/llama.cpp"; LLAMA_DEVICE="ROCm0"; LLAMA_PORT="${CLAUDE_LOCAL_LLAMASERVER_PORT:-1244}"
-MODEL_GGUF=""; DRAFT="https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"; DRAFT_SIZE=639446688
+MODEL_GGUF=""; DRAFT="none"; DRAFT_SIZE=639446688   # speculative decoding measured slower on gfx1151; opt in with --draft URL
+DRAFT_DEFAULT_URL="https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1;; --no-smoke) SMOKE=0;;
     --model) MODEL=$2; shift;; --port) PORT=$2; PORT_EXPLICIT=1; shift;; --gpu) GPU=$2; shift;;
     --backend) BACKEND=$2; shift;; --llama-cpp) LLAMA_CPP_DIR=$2; shift;; --device) LLAMA_DEVICE=$2; shift;;
-    --llama-port) LLAMA_PORT=$2; shift;; --model-gguf) MODEL_GGUF=$2; shift;; --draft) DRAFT=$2; shift;;
+    --llama-port) LLAMA_PORT=$2; shift;; --model-gguf) MODEL_GGUF=$2; shift;; --draft) DRAFT=$2; [ "$DRAFT" = default ] && DRAFT="$DRAFT_DEFAULT_URL"; shift;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac; shift
