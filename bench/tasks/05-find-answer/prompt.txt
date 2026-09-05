@@ -1,0 +1,1 @@
+Find which file assigns the constant CONFIG_VERSION and what string value it is set to. Write a file named ANSWER.txt in this directory containing exactly one line of the form <relative/path/to/file>:<value> (for example src/foo.py:1.0.0) and nothing else.

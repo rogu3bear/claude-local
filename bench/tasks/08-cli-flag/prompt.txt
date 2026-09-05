@@ -1,0 +1,1 @@
+Add a `--shout` flag to greet.py that, when given, prints the greeting in uppercase (e.g. `python3 greet.py --shout bob` prints HELLO, BOB!). Without the flag behaviour is unchanged. Document the new flag in the Options section of README.md.

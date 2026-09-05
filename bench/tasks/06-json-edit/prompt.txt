@@ -1,0 +1,1 @@
+In package.json: bump "version" to 1.3.0, and add a top-level "engines" object with "node": ">=20". Keep everything else exactly as it is and keep the file valid JSON.

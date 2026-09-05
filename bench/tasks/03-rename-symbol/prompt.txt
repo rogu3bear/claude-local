@@ -1,0 +1,1 @@
+Rename the function `calc` in app/pricing.py to `compute_total` and update every reference to it across the repository so that `python3 test_app.py` still runs and prints 9.0 then total=9.0. No references to the old name may remain.

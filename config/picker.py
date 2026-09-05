@@ -1,104 +1,86 @@
 #!/usr/bin/env python3
-"""Interactive model picker for claude-local against an Ollama backend.
+"""Interactive model picker for claude-local.
 
-Reads Ollama's /api/tags response (path passed via MODELS_JSON_PATH) and the
-currently-loaded models (comma-separated names via LOADED_MODELS) and lists
-every installed model with its load state:
+Reads the backend inventory ({"models":[{"name":..., "size":..., "details":{...}}]}
+from MODELS_JSON_PATH) and the currently-loaded model names (comma-separated
+in LOADED_MODELS), lists every model with its load state:
 
-    [LOADED] model is pinned in VRAM right now
-    [idle]   model is installed but not currently loaded
+    [LOADED] model is in memory right now
+    [idle]   model is installed but not loaded
 
-When CLAUDE_LOCAL_MODEL is set, skips the menu and returns non-interactively.
+When CLAUDE_LOCAL_MODEL is set, skips the menu (exact match first, then
+substring) and returns non-interactively.
 
-Prints one line to stdout:  <ACTION>|<model-key>|<context-length>
-    ACTION = LOAD  -> launcher should explicitly pin the model (keep_alive)
-    ACTION = USE   -> model is already loaded; launcher can skip the load
+Prints exactly one machine-readable line to stdout:  <ACTION>|<model-name>
+    ACTION = LOAD -> launcher should load/pin the model first
+    ACTION = USE  -> model is already loaded
+Everything human-facing goes to stderr.
 """
-
 import json
 import os
 import sys
-
-DEFAULT_CTX = 32768
 
 
 def main() -> None:
     models_path = os.environ["MODELS_JSON_PATH"]
     pre = os.environ.get("CLAUDE_LOCAL_MODEL") or ""
-    loaded_raw = os.environ.get("LOADED_MODELS") or ""
-    loaded = {name.strip().lower() for name in loaded_raw.split(",") if name.strip()}
+    loaded = {n.strip().lower() for n in (os.environ.get("LOADED_MODELS") or "").split(",") if n.strip()}
 
     try:
         with open(models_path) as f:
-            data = json.load(f)
+            models = json.load(f).get("models", [])
     except Exception as e:  # noqa: BLE001
-        print(f"ERR:could not parse model inventory: {e}", file=sys.stderr)
+        print(f"ERR:could not parse model inventory: {e}")
         sys.exit(2)
 
-    models = data.get("models", [])
-    llms = [m for m in models if m.get("type", "llm") != "embedding"]
+    def name(m):
+        return str(m.get("name") or "")
 
-    def key(m):
-        return m.get("key") or m.get("name")
-
-    def is_loaded(m):
-        return str(key(m)).lower() in loaded
-
-    def params(m):
+    def info(m):
         d = m.get("details") or {}
-        return f"{d.get('parameter_size') or d.get('parameters') or ''} {d.get('quantization_level') or m.get('quantization') or ''}".strip()
+        size = m.get("size") or 0
+        gb = f"{size / 1e9:.0f}GB" if size else ""
+        return " ".join(x for x in (d.get("parameter_size"), d.get("quantization_level"), gb) if x)
 
-    if not llms:
-        print("No models found. Pull one with:  ollama pull <model>", file=sys.stderr)
-        if pre:
-            print(f"ERR:model '{pre}' not found in Ollama", file=sys.stderr)
-            sys.exit(2)
-        print("ERR:no models found", file=sys.stderr)
+    def result(n):
+        print(f"{'USE' if n.lower() in loaded else 'LOAD'}|{n}")
+
+    if not models:
+        print("No models installed. Pull one with:  ollama pull <model>", file=sys.stderr)
+        print("ERR:no models found")
         sys.exit(2)
 
     if pre:
-        low = pre.lower()
-        candidates = [key(m) for m in llms if str(key(m)) == pre] or [
-            key(m) for m in llms if low in str(key(m)).lower()
-        ]
-        if not candidates:
-            print(f"ERR:model '{pre}' not found in Ollama", file=sys.stderr)
+        exact = [name(m) for m in models if name(m) == pre]
+        fuzzy = [name(m) for m in models if pre.lower() in name(m).lower()]
+        pick = (exact or fuzzy or [None])[0]
+        if not pick:
+            print(f"ERR:model '{pre}' not found")
             sys.exit(2)
-        ckey = candidates[0]
-        action = "USE" if ckey.lower() in loaded else "LOAD"
-        print(f"{action}|{ckey}|{DEFAULT_CTX}")
-        sys.exit(0)
+        result(pick)
+        return
 
-    # All human-facing output goes to stderr; stdout carries exactly one
-    # machine-readable result line so the launcher can capture it.
-    print("\nINSTALLED MODELS (an unused one is loaded on selection):", file=sys.stderr)
-    for i, m in enumerate(llms, 1):
-        state = "LOADED" if is_loaded(m) else "idle"
-        print(f"  {i:2d}) [{state:6s}] {str(key(m)):<36s} {params(m)}", file=sys.stderr)
-
-    def ask(prompt):
-        sys.stderr.write(prompt)
-        sys.stderr.flush()
-        return input()
+    print("\nINSTALLED MODELS (an idle one is loaded on selection):", file=sys.stderr)
+    for i, m in enumerate(models, 1):
+        state = "LOADED" if name(m).lower() in loaded else "idle"
+        print(f"  {i:2d}) [{state:6s}] {name(m):<36s} {info(m)}", file=sys.stderr)
 
     while True:
+        sys.stderr.write("\nPick a model number (or 'q' to quit): ")
+        sys.stderr.flush()
         try:
-            sel = ask("\nPick a model number (or 'q' to quit): ").strip()
+            sel = input().strip()
         except (EOFError, KeyboardInterrupt):
             print("\nAborted.", file=sys.stderr)
+            print("ERR:aborted")
             sys.exit(130)
         if sel.lower() in ("q", "quit", "exit"):
-            print("ERR:aborted", file=sys.stderr)
+            print("ERR:aborted")
             sys.exit(1)
-        if not sel.isdigit() or not (1 <= int(sel) <= len(llms)):
-            print("  invalid choice", file=sys.stderr)
-            continue
-        break
-
-    chosen = llms[int(sel) - 1]
-    ckey = key(chosen)
-    action = "USE" if ckey.lower() in loaded else "LOAD"
-    print(f"{action}|{ckey}|{DEFAULT_CTX}")
+        if sel.isdigit() and 1 <= int(sel) <= len(models):
+            break
+        print("  invalid choice", file=sys.stderr)
+    result(name(models[int(sel) - 1]))
 
 
 if __name__ == "__main__":

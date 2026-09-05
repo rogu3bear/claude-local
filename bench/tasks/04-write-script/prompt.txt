@@ -1,0 +1,1 @@
+Create an executable bash script named count_lines.sh in this directory. It takes one file path argument and prints only the number of lines in that file (no filename, no extra text). It must exit with status 2 and print "usage: count_lines.sh FILE" to stderr when called with no argument. Verify it works on words.txt.

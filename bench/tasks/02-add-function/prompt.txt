@@ -1,0 +1,1 @@
+Add a function `slugify(text)` to utils.py. It must: lowercase the input, replace every run of characters that are not a-z or 0-9 with a single hyphen, and strip leading/trailing hyphens. Example: slugify("Hello,  World! 2024") == "hello-world-2024". Keep the existing truncate function unchanged.
