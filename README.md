@@ -15,13 +15,54 @@ backed by a benchmark number.
     make check-interactive  # pty-driven full session (picker, statusline, Ctrl-C, exit menu)
     make bench LABEL=x      # benchmark a configuration; make compare to read results
 
+## Backends
+
+Two servers can be installed side by side; `CLAUDE_LOCAL_BACKEND` picks one and
+`~/.claude-local/env` maps it to its port (Ollama 1234, llama-server 1244).
+
+| backend | server | why |
+|---|---|---|
+| `ollama` (default) | Ollama 0.33.3, Vulkan, user unit `ollama.service` | simplest; measured baseline below |
+| `llamaserver` | upstream llama.cpp `llama-server`, user unit `llama-server.service` | HIP (ROCm) or Vulkan from the same unit, speculative decoding, on-disk prompt cache, dedicated Qwen3-Coder tool-call parser |
+
+    CLAUDE_LOCAL_BACKEND=llamaserver claude-local     # one session on llama-server
+    make check-llama                                   # smoke turn against it
+    ./bootstrap.sh --backend llamaserver               # install it (needs a llama.cpp build, see below)
+
+`~/.claude-local/llama-server.env` is the whole configuration of that unit: `LLAMA_DEVICE=ROCm0|Vulkan0`
+(which implies build-hip or build-vulkan), the model GGUF (Ollama's blob is reused, no second copy),
+the alias Claude sees, and the speculative settings (`LLAMA_ARG_SPEC_TYPE=draft-simple` with the
+Qwen3-0.6B draft, `ngram-mod`/`ngram-cache` for draft-free, or commented out). Tuning that should not
+drift lives in `systemd/llama-server/10-claude-local.conf` (128K context, q8_0 KV with flash attention,
+one slot, Ollama-parity batch sizes, cache reuse). Switch device or speculation: edit one line, then
+`systemctl --user restart llama-server.service`. `/health` answers 503 for the whole load, so every
+claude-local path waits for it and never restarts a loading server.
+
+"Unload" on this backend saves slot 0's prompt cache to `~/.claude-local/slots/` and leaves the server
+up; the next launch restores it, so a fresh session starts warm even after a server restart
+(`CLAUDE_LOCAL_LLAMA_STOP_ON_UNLOAD=1` also stops the unit to free ~26GB).
+
+### llama.cpp build recipe (ROCm 7.14 TheRock at /opt/rocm, gfx1151)
+
+    git clone https://github.com/ggml-org/llama.cpp ~/ai/llama.cpp && cd ~/ai/llama.cpp
+    HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+      cmake -S . -B build-hip -DGGML_HIP=ON -DGPU_TARGETS=gfx1151 -DCMAKE_BUILD_TYPE=Release
+    cmake --build build-hip --config Release -j -t llama-server llama-bench
+    cmake -S . -B build-vulkan -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+    cmake --build build-vulkan --config Release -j -t llama-server llama-bench
+
+`GGML_HIP_ROCWMMA_FATTN` no longer exists upstream (removed July 2026); `-fa on` uses the native
+kernel. Ollama's own bundled ROCm 7.2 runtime segfaults on this kernel (7.0); the upstream build links
+the system ROCm and works.
+
+Memory when everything is resident: Ollama ~26GB + llama-server ~26GB + draft ~8GB of the 108GB GPU pool.
+
 ## What is here
 
 | path | role |
 |---|---|
 | `bin/claude-local` | launcher: server check, model picker, load, autocompact fit, prompt render, usage proxy, Claude launch, post-exit menu |
 | `config/backend-ollama.sh` | backend adapter (the function contract is documented in the file) |
-| `config/backend-llamaserver.sh` | llama.cpp adapter with slot save/restore. **Untested**: no binary on this machine |
 | `config/proxy.py` | streaming reverse proxy that logs per-turn usage (cache hit, tok/s, latency); optional sampling override |
 | `config/statusline.sh` | four-line cockpit fed by the proxy log; per-session state |
 | `config/picker.py` | model menu, or non-interactive via `CLAUDE_LOCAL_MODEL` |
@@ -31,7 +72,9 @@ backed by a benchmark number.
 | `systemd/ollama.service` | generic unit template (no GPU or tuning env; those are drop-ins) |
 | `systemd/10-claude-local.conf` | drop-in: flash attention, 128K context, q8_0 KV, one slot, 2h keep-alive. Flash attention lives here because q8_0 KV silently falls back to f16 without it |
 | `systemd/20-gpu-*.conf` | GPU profile drop-ins; bootstrap installs the chosen one as `20-gpu.conf` |
-| `bench/` | 8 fixed tasks, runner, comparison; results from 2026-09-05 in `bench/results` |
+| `systemd/llama-server/` | llama-server unit template and drop-in; `config/llama-server.env.example` is its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir) |
+| `config/backend-llamaserver.sh` | llama-server adapter: health with 503-while-loading semantics, models/props, slot save/restore |
+| `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner, comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs); results in `bench/results` |
 | `test/` | smoke turn and pty-driven interactive session |
 
 All env overrides are listed at the top of `bin/claude-local`.
