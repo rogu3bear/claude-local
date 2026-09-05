@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+# claude-local: launch Claude Code exclusively against a local Ollama server
+# served on localhost:1234, using a fully isolated config directory so your
+# normal ~/.claude setup is never read or written.
+#
+# Flow: check Ollama -> show installed models (with load state) -> pick one ->
+# explicitly load it (with a timed/progress readout) -> start claude --model
+# pointed at the local server -> after close, offer quietly to unload / leave /
+# load a different model.
+#
+# Env overrides:
+#   CLAUDE_LOCAL_MODEL   model key to use directly, skipping the menu
+#   CLAUDE_LOCAL_PORT    server port (default 1234)
+#   CLAUDE_LOCAL_CONFIG  isolated config dir (default ~/.claude-local)
+
+set -uo pipefail
+
+PORT="${CLAUDE_LOCAL_PORT:-1234}"
+BASE_URL="http://localhost:${PORT}"
+CONFIG_DIR="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
+AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-lmstudio}"
+
+export CLAUDE_CONFIG_DIR="$CONFIG_DIR"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="1"
+
+say()  { printf '\033[1;34m[local]\033[0m %s\n' "$*" >&2; }
+err()  { printf '\033[1;31m[local] error:\033[0m %s\n' "$*" >&2; return 1; }
+warn() { printf '\033[1;33m[local] warn:\033[0m %s\n' "$*" >&2; }
+
+# --- 1. Ensure the Ollama server is reachable --------------------------------
+server_up() {
+  curl -s --max-time 3 -o /dev/null "${BASE_URL}/api/tags"
+}
+
+if ! server_up; then
+  # If the user-local systemd service exists, offer to start it.
+  systemctl --user is-active ollama.service >/dev/null 2>&1 && {
+    say "Ollama service is not responding; restarting it..."
+    systemctl --user restart ollama.service 2>&1 >&2 || true
+    sleep 3
+  }
+  if server_up; then
+    say "Server is up at ${BASE_URL}"
+  else
+    err "Ollama server is not reachable at ${BASE_URL}."
+    echo "  Start it with:  systemctl --user start ollama.service" >&2
+    echo "  Or run:         ollama serve" >&2
+    read -r -p "  Press Enter once the server is running to retry, or Ctrl-C to abort: " _
+    if ! server_up; then
+      err "Server still not reachable. Aborting."
+      exit 1
+    fi
+    say "Server is up at ${BASE_URL}"
+  fi
+fi
+
+# --- 2. Fetch model inventory + current load state ---------------------------
+MODELS_JSON_PATH=$(mktemp)
+trap 'rm -f "$MODELS_JSON_PATH"' EXIT
+curl -s --max-time 10 "${BASE_URL}/api/tags" > "$MODELS_JSON_PATH"
+LOADED_NAMES=$(curl -s --max-time 5 "${BASE_URL}/api/ps" | jq -r '[.models[].name] | join(",")' 2>/dev/null)
+
+# --- 3. Interactive picker (runs from its own file so stdin stays free) -----
+PICK=$(CLAUDE_LOCAL_MODEL="${CLAUDE_LOCAL_MODEL:-}" MODELS_JSON_PATH="$MODELS_JSON_PATH" \
+  LOADED_MODELS="$LOADED_NAMES" \
+  python3 "$CONFIG_DIR/picker.py")
+
+ACTION="${PICK%%|*}"
+REST="${PICK#*|}"
+MODEL="${REST%%|*}"
+CTX="${REST#*|}"
+
+case "$ACTION" in
+  USE|LOAD) : ;;
+  *) err "${PICK#ERR:}"; exit 1 ;;
+esac
+
+# --- 3b. Explicitly load the chosen model so it is warm before Claude starts --
+# LOAD means the model is not in VRAM yet; pin it with a long keep_alive so the
+# session never waits on a cold reload. USE means it is already loaded.
+# While loading we show a spinner plus a live elapsed-time readout so the user
+# can see how long the (potentially 30B+) model is taking to load.
+if [ "$ACTION" = "LOAD" ]; then
+  SAY_LEN=${#MODEL}
+  spinner=( "◐" "◓" "◑" "◒" )
+  LOAD_START=$(date +%s)
+  # Run the (possibly slow) load in a child, spinner + timer on stderr.
+  (
+    curl -s --max-time 600 "${BASE_URL}/api/generate" \
+      -d "{\"model\":\"${MODEL}\",\"prompt\":\"\",\"stream\":false,\"options\":{\"num_predict\":0},\"keep_alive\":\"2h\"}" \
+      >/dev/null 2>&1
+  ) &
+  LOAD_PID=$!
+  while kill -0 "$LOAD_PID" 2>/dev/null; do
+    el=$(( $(date +%s) - LOAD_START ))
+    printf '\033[1;34m[local]\033[0m loading %-*s %s %2ds\r' "$SAY_LEN" "$MODEL" "${spinner[$((el%4))]}" "$el" >&2
+    sleep 0.2
+  done
+  wait "$LOAD_PID"
+  LOAD_RC=$?
+  LOAD_SECS=$(( $(date +%s) - LOAD_START ))
+  # clear the spinner line
+  printf '\033[1;34m[local]\033[0m loaded %-*s     %2ds\n' "$SAY_LEN" "$MODEL" "$LOAD_SECS" >&2
+  if [ "$LOAD_RC" -ne 0 ]; then
+    err "Failed to load model ${MODEL}."
+    exit 1
+  fi
+  # confirm it actually shows up as loaded
+  LOADED_NOW=$(curl -s --max-time 5 "${BASE_URL}/api/ps" | jq -r --arg m "$MODEL" \
+    '[.models[].name | select(. == $m)] | length' 2>/dev/null)
+  if [ "${LOADED_NOW:-0}" -ge 1 ]; then
+    say "Model ${MODEL} is LOADED (${LOAD_SECS}s)."
+  else
+    warn "Could not confirm ${MODEL} is loaded; continuing anyway (Ollama will load on first request)."
+  fi
+else
+  say "Model ${MODEL} is already loaded."
+fi
+
+# --- 4. Launch Claude Code against the local server --------------------------
+export ANTHROPIC_BASE_URL="$BASE_URL"
+export ANTHROPIC_AUTH_TOKEN="$AUTH_TOKEN"
+
+# Disable the dynamic billing/attribution header so the Ollama prefix cache is
+# reused between turns (Claude Code's changing header otherwise invalidates it,
+# causing ~40s reprocessing per turn). Local backend only.
+export CLAUDE_CODE_ATTRIBUTION_HEADER="0"
+
+SYSTEM_PROMPT_FILE="$CONFIG_DIR/system_prompt.md"
+
+# Session-start markers so the statusline can show an elapsed-time ("focus")
+# segment and know which model THIS session launched (to flag a mismatch if
+# another session has swapped the model in VRAM). Reused per render.
+: > "$CONFIG_DIR/session_start"
+date +%s > "$CONFIG_DIR/session_start"
+: > "$CONFIG_DIR/session_model"
+printf '%s' "$MODEL" > "$CONFIG_DIR/session_model"
+
+say "Starting Claude Code with local model ${MODEL} (isolated config: ${CONFIG_DIR})"
+# Let Ctrl-C terminate claude (the foreground child) but keep our own INT
+# swallowed so we can still offer the post-exit model action instead of dying.
+trap '' INT
+claude --model "$MODEL" --append-system-prompt-file "$SYSTEM_PROMPT_FILE" "$@"
+CLAUDE_EXIT=$?
+trap - INT
+say "Claude Code exited (code ${CLAUDE_EXIT})."
+
+# --- 5. Post-exit model action: unload / leave / load another -----------------
+unload_model() { # $1 = model key
+  curl -s --max-time 600 "${BASE_URL}/api/generate" \
+    -d "{\"model\":\"$1\",\"prompt\":\"\",\"stream\":false,\"options\":{\"num_predict\":0},\"keep_alive\":0}" \
+    >/dev/null 2>&1
+}
+load_model() { # $1 = model key  (with the same spinner+timed readout as launch)
+  local m=$1 t0 el
+  t0=$(date +%s)
+  (
+    curl -s --max-time 600 "${BASE_URL}/api/generate" \
+      -d "{\"model\":\"$m\",\"prompt\":\"\",\"stream\":false,\"options\":{\"num_predict\":0},\"keep_alive\":\"2h\"}" \
+      >/dev/null 2>&1
+  ) &
+  local pid=$!
+  local spins=( "◐" "◓" "◑" "◒" )
+  while kill -0 "$pid" 2>/dev/null; do
+    el=$(( $(date +%s) - t0 ))
+    printf '\033[1;34m[local]\033[0m loading %s %s %2ds\r' "$m" "${spins[$((el%4))]}" "$el" >&2
+    sleep 0.2
+  done
+  wait "$pid"
+  el=$(( $(date +%s) - t0 ))
+  printf '\033[1;34m[local]\033[0m loaded %s      %2ds\n' "$m" "$el" >&2
+  return $?
+}
+loaded_names() {
+  curl -s --max-time 5 "${BASE_URL}/api/ps" | jq -r '[.models[].name] | join(",")' 2>/dev/null
+}
+
+still_loaded=$(loaded_names)
+if [ -n "$still_loaded" ]; then
+  # Quiet, single-shot prompt. Enter = leave loaded (the common case).
+  printf '\033[1;36mmodels in VRAM:\033[0m %s  (u)nload  load (a)nother  [Enter=leave]  ' "$still_loaded" >&2
+  read -r ans
+  case "${ans:-}" in
+    u|U|unload)
+      for m in ${still_loaded//,/ }; do
+        say "Unloading ${m}..."
+        unload_model "$m"
+      done
+      remaining=$(loaded_names)
+      if [ -n "$remaining" ]; then warn "Still loaded: ${remaining}"; else say "VRAM freed."; fi
+      ;;
+    a|A|another)
+      PICK2=$(CLAUDE_LOCAL_MODEL="${CLAUDE_LOCAL_MODEL:-}" MODELS_JSON_PATH="$MODELS_JSON_PATH" \
+        LOADED_MODELS="$(loaded_names)" \
+        python3 "$CONFIG_DIR/picker.py")
+      A2="${PICK2%%|*}"; R2="${PICK2#*|}"; M2="${R2%%|*}"
+      if [ "$A2" = "USE" ] || [ "$A2" = "LOAD" ]; then
+        load_model "$M2"
+        now_loaded=$(loaded_names)
+        if [ -n "$now_loaded" ]; then say "Now loaded: ${now_loaded}"; else warn "Load of ${M2} could not be confirmed."; fi
+      else
+        err "${PICK2#ERR:}"
+      fi
+      ;;
+    *)
+      say "Leaving ${still_loaded} loaded."
+      ;;
+  esac
+else
+  say "No model is loaded in VRAM."
+fi
+
+exit ${CLAUDE_EXIT:-0}
