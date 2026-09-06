@@ -1,0 +1,5 @@
+backend: llamaserver port=1244 model=qwen3-coder:30b
+banner : Starting Claude Code: model=qwen3-coder:30b ctx=131072 autocompact=120832 max_output=8192 prompt=append offline=1 via http://localhost:1245 (config: /home/mln-dev/.claude-local)
+result : SMOKEOK  (exit 0)
+proxy  : port=1245 usage_rows=1
+SMOKE PASS

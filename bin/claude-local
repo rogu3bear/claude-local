@@ -25,11 +25,12 @@
 #                             append  = built-in prompt + system_prompt.md
 #                             replace = system_prompt_compact.md instead of the built-in prompt
 #   CLAUDE_LOCAL_SNAPSHOT     1 = --system-prompt-snapshot on + exclude dynamic sections (default 1)
-#   CLAUDE_LOCAL_DISALLOWED_TOOLS  comma list passed as --disallowedTools. Default prunes the
-#                             tools a small local model only wastes turns on (measured: through
-#                             llama-server it made 30 ReportFindings + 20 TaskList calls per 27
-#                             tasks, plus subagents): Agent,ReportFindings,TaskCreate,TaskUpdate,TaskList,TaskGet,WebFetch,WebSearch,NotebookEdit.
-#                             Set to "" to allow everything.
+#   CLAUDE_LOCAL_TOOLS        comma list passed as --tools: the ONLY tools the model sees
+#                             (default Bash,Read,Edit,Write,Grep,Glob). Measured 2026-09-05: with the
+#                             full tool list a small local model burns ~30% of its turns on
+#                             meta-tools (ReportFindings, TaskList/Create/Update, Skill, subagents),
+#                             and the schemas cost ~5K prompt tokens. Set to "" for the full list.
+#   CLAUDE_LOCAL_DISALLOWED_TOOLS  extra comma list passed as --disallowedTools (default none)
 #   CLAUDE_LOCAL_SAMPLING     JSON sampling override applied by the proxy to every request,
 #                             e.g. '{"temperature":0.7,"top_p":0.8,"top_k":20}' (default: none)
 #   CLAUDE_LOCAL_PROXY_DEBUG  1 = proxy also logs request params/tool count/system size
@@ -52,7 +53,8 @@ USE_PROXY="${CLAUDE_LOCAL_PROXY:-1}"
 PROXY_PORT="${CLAUDE_LOCAL_PROXY_PORT:-$((PORT + 1))}"
 PROMPT_MODE="${CLAUDE_LOCAL_PROMPT:-append}"
 MAX_OUTPUT="${CLAUDE_LOCAL_MAX_OUTPUT:-8192}"
-DISALLOWED_TOOLS="${CLAUDE_LOCAL_DISALLOWED_TOOLS-Agent,ReportFindings,TaskCreate,TaskUpdate,TaskList,TaskGet,WebFetch,WebSearch,NotebookEdit}"
+TOOLS="${CLAUDE_LOCAL_TOOLS-Bash,Read,Edit,Write,Grep,Glob}"
+DISALLOWED_TOOLS="${CLAUDE_LOCAL_DISALLOWED_TOOLS-}"
 OFFLINE="${CLAUDE_LOCAL_OFFLINE:-1}"
 SNAPSHOT="${CLAUDE_LOCAL_SNAPSHOT:-1}"
 AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-local}"
@@ -190,6 +192,7 @@ esac
 if [ "$SNAPSHOT" = "1" ]; then
   CLAUDE_FLAGS+=(--system-prompt-snapshot on --exclude-dynamic-system-prompt-sections)
 fi
+[ -n "$TOOLS" ] && CLAUDE_FLAGS+=(--tools "$TOOLS")
 [ -n "$DISALLOWED_TOOLS" ] && CLAUDE_FLAGS+=(--disallowedTools "$DISALLOWED_TOOLS")
 
 # --- 7. Usage proxy (per-turn cache hit / tok/s for the statusline) ------------

@@ -1,0 +1,12 @@
+PASS  picker menu shown
+      picking entry 1 (qwen3-coder:30b)
+PASS  model accepted + claude start
+PASS  claude TUI ready
+PASS  model answered (assistant output)
+PASS  statusline shows proxy stats
+PASS  context gauge uses 120K window
+PASS  first Ctrl-C prompts
+PASS  wrapper survives: post-exit menu
+PASS  leave loaded
+launcher exit code 0
+9/9 steps passed
