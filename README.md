@@ -120,6 +120,8 @@ Microbench (`bench/microbench.py`, cold prompt, temperature 0, medians of 3; raw
 
 (prefill and decode in tok/s; "warm turn" = cached prefix plus a few new tokens and 128 output tokens, the shape of a Claude Code turn)
 
+Stack identity for every 2026-09-05 row (`bench/stack.sh`): kernel 7.0.0-31, firmware pfp/mec/mes 0x31/0x22/0x86, Mesa 25.2.8 (RADV), glslc 2023.8, llama.cpp 6a1a922d2, Ollama 0.33.3, ROCm 7.14. Caveat: the upstream Vulkan build was compiled with Ubuntu's glslc 2023.8, which lacks the integer-dot-product and bfloat16 extensions (20 q8_1 shader variants vs 513 in Ollama's bundled Vulkan library), so the "upstream Vulkan" rows understate what a LunarG-glslc rebuild would give. No GPU resets occurred during these runs (the previous boot had 9, all on Sep 3-4 under Ollama's Vulkan runner at 60-87K tokens in flight; kernel 7.0's 2s GPU job timeout is the suspected cause).
+
 - **Upstream Vulkan beats Ollama's Vulkan everywhere**: +10% to +64% prefill, equal-or-better decode, and 22.5 vs 8.2 tok/s decode at 100K context. Newer kernels, same backend.
 - **HIP prefills fastest but decodes slowest**, and its decode collapses with context (7.6 tok/s at 100K). Claude turns are decode-dominated, so Vulkan wins the per-turn cost at every depth; HIP is the choice only for prefill-bound work. Both backends lose ~90% of prefill throughput between depth 0 and 100K in llama-bench, so that cliff is the hardware's attention cost, not a HIP regression.
 - **q8_0 KV cache is faster than f16 here** (30K: 2x prefill, +33% decode): attention is bandwidth-bound and the smaller cache wins. Keep q8_0.
