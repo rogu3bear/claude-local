@@ -1,3 +1,9 @@
 __pycache__/
 bench/work/
 *.pre-install
+
+# Benchmark raw output (per-run JSON/stderr/metrics) — keep .jsonl/.md summaries only
+bench/results/*/*.err
+bench/results/*/*.json
+bench/results/proxy/*.log
+bench/results/proxy/metrics-*
