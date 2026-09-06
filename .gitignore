@@ -6,5 +6,8 @@ bench/work/
 bench/results/*/*.err
 bench/results/*/*.json
 bench/results/*.log
+bench/results/*.jsonl
+bench/results/*.md
 bench/results/proxy/*.log
+bench/results/proxy/*.jsonl
 bench/results/proxy/metrics-*
