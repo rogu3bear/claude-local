@@ -128,9 +128,29 @@ Stack identity for every 2026-09-05 row (`bench/stack.sh`): kernel 7.0.0-31, fir
 - **Speculative decoding loses on this iGPU** despite 55% draft acceptance (2.6 tokens per verify step): the batched verify costs more than the tokens it saves. Draft n_max 8/16 and both ngram modes are worse still. Off by default; the env file documents how to re-try on other hardware.
 - Ollama's bundled ROCm 7.2 segfaults on this Linux 7.0 kernel; the upstream HIP build links the system ROCm 7.14 and runs.
 
+## Full-bench decision, 2026-09-05 evening (9 tasks x 3 reps, through the proxy, GPU 62-95C throttled, back to back)
+
+| label | tools | pass | mean | median | turns/task | prompt tok/task |
+|---|---|---|---|---|---|---|
+| Ollama Vulkan, full tool list minus Agent | all minus Agent | 27/27 | 49.0s | 42.4s | 9.3 | 148K |
+| upstream Vulkan, same | all minus Agent | 27/27 | 65.6s | 55.2s | 12.0 | 217K |
+| upstream HIP, same | all minus Agent | 27/27 | 154.3s | 75.6s | 12.8 | 230K |
+| Ollama Vulkan, 9 meta-tools denylisted | minus 9 | 27/27 | 26.1s | 23.8s | 7.9 | 98K |
+| upstream Vulkan, same | minus 9 | 26/27 | 187.7s | 107.9s | 15.2 | 347K |
+| **Ollama Vulkan, core allowlist (shipped default)** | Bash,Read,Edit,Write,Grep,Glob | 27/27 | **21.4s** | 20.8s | 8.5 | 50K |
+| upstream Vulkan, core allowlist | same | 27/27 | 39.5s | 36.4s | 13.9 | 99K |
+
+- **The tool surface is the second biggest lever after the cache flag.** With the full tool list the model spends ~30% of its turns on meta-tools (ReportFindings, TaskList/Create/Update, Skill, subagents); denylisting some just routes it to the next sink (74 Skill calls through llama-server, 3x task time). `--tools Bash,Read,Edit,Write,Grep,Glob` removes the sinks and shrinks the system prompt from ~15K to ~4.3K tokens. Ollama went 49s -> 21.4s on the same evening; the morning baseline on a cool GPU was 31s.
+- **Default backend stays Ollama.** With identical tools, sampling and GGUF, the model takes 64% more turns and emits 2x the output tokens through llama-server's chat template, so task time is 1.8x worse even though the engine is equal or faster per turn (decode 69 vs 69 tok/s; large-prefill TTFT 9.1s vs 12.9s). Gate 2 fails; gates 1, 3, 4 and 5 pass (27/27, zero flakes in 108 llama-server runs, interactive 9/9, warm resume and slot restore verified).
+- llama-server stays installed and verified as the alternative (`CLAUDE_LOCAL_BACKEND=llamaserver claude-local`): it wins at long context (22.5 vs 8.2 tok/s decode at 100K), persists the prompt cache across restarts (12.4K tokens saved in 123ms / restored in 42ms; next turn 2.9s TTFT vs 13.8s cold), and parses Qwen3-Coder tool calls natively. HIP is prefill-fast but collapses at depth (154s mean here); use it only for prefill-bound work.
+- Stack for every row: kernel 7.0.0-31, fw pfp/mec/mes 31/22/86, Mesa 25.2.8 (RADV), glslc 2023.8, llama.cpp 6a1a922d2, Ollama 0.33.3, ROCm 7.14 (`bench/stack.sh`; recorded per row from now on). Raw rows: `bench/results/fb-*.jsonl`, per-turn proxy logs `bench/results/proxy/`, metrics snapshots alongside.
+
 ## Known unknowns
 
-- 2 of 81 benchmark runs had the model emit a malformed native XML tool call as text on turn 1.
+- **Why the model behaves differently through llama-server's template** (same GGUF, sampling, tools: +64% turns, 2x output). Suspects: the GGUF's jinja template (tool rendering, system placement) vs Ollama's chatml template, and tool-call parsing leniency. Experiment: `--chat-template-file` with a template rendering like Ollama's, then `bench/run.sh --label ls-vk-tmpl --port 1244 ... --tools Bash,Read,Edit,Write,Grep,Glob` vs `fb-ollama-vk-core`. If turns equalise, llama-server should win outright on its per-turn numbers.
+- The upstream Vulkan build used glslc 2023.8 (20 q8_1 shader variants vs 513 in Ollama's bundled library); a LunarG-glslc rebuild is scheduled by the platform-currency session, then rerun the `intdot-vk` labels.
+- Kernel 7.0's 2s GPU job timeout vs ggml-vulkan's 100-node submits: ring timeouts on Sep 3-4 under Ollama's Vulkan runner at 60-87K tokens; none during today's runs. `GGML_VK_MAX_NODES_PER_SUBMIT` test pending.
+- 2 of 81 morning runs (full tool list, Ollama) had the model emit a malformed native XML tool call as text on turn 1; zero in the 216 evening runs.
   Claude sends no temperature/top_p, so sampling can be pinned either in a Modelfile or with
   `CLAUDE_LOCAL_SAMPLING='{"temperature":0.7,"top_p":0.8,"top_k":20}'`. Unmeasured. To measure:
   start `config/proxy.py` with `PROXY_SAMPLING` set and run `bench/run.sh --label sampling --port 1235 --repeat 3 -- ...`.

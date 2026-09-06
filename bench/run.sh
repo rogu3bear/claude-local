@@ -51,6 +51,7 @@ else
   server_env=$( { systemctl --user show llama-server.service -p Environment 2>/dev/null | sed 's/^Environment=//' | tr ' ' '\n' | grep -E '^LLAMA_ARG_(CTX_SIZE|CACHE_TYPE_K|UBATCH)='; grep -E '^LLAMA_(DEVICE|ARG_SPEC_TYPE|ARG_SPEC_DRAFT_N_MAX)=' "$CONFIG_DIR/llama-server.env" 2>/dev/null; } | paste -sd' ')
 fi
 flags_str=$(printf '%q ' "${EXTRA[@]}")
+stack_str=$("$HERE/stack.sh" 2>/dev/null || echo "")
 
 # Environment for the child claude: isolated config, local server, no nesting markers.
 run_claude() { # cwd is the task dir; args: prompt
@@ -84,14 +85,14 @@ for task in $task_list; do
     row=$(jq -c --arg label "$LABEL" --arg task "$task" --argjson rep "$rep" --argjson ok "$ok" \
              --argjson wall "$wall" --argjson rc "$rc" --argjson timed_out "$timed_out" \
              --arg model "$MODEL" --arg ctx "${ctx_len:-}" --arg server "$server_env" --arg flags "$flags_str" \
-             --arg notes "$NOTES" --arg ts "$(date -Is)" --arg backend "$BACKEND" '
+             --arg notes "$NOTES" --arg ts "$(date -Is)" --arg backend "$BACKEND" --arg stack "$stack_str" '
       def n(x): (x // 0);
       {label:$label, backend:$backend, task:$task, rep:$rep, ok:$ok, wall_s:$wall, rc:$rc, timed_out:$timed_out,
        num_turns:n(.num_turns), duration_ms:n(.duration_ms), duration_api_ms:n(.duration_api_ms),
        input:n(.usage.input_tokens), cache_read:n(.usage.cache_read_input_tokens),
        cache_creation:n(.usage.cache_creation_input_tokens), output:n(.usage.output_tokens),
        is_error:(.is_error // ($rc!=0)), subtype:(.subtype // "none"),
-       model:$model, ctx_len:$ctx, server:$server, flags:$flags, notes:$notes, ts:$ts}
+       model:$model, ctx_len:$ctx, server:$server, flags:$flags, notes:$notes, stack:$stack, ts:$ts}
       | .prompt_tokens = (.input + .cache_read)
       | .cache_hit_pct = (if .prompt_tokens>0 then (100*.cache_read/.prompt_tokens|floor) else 0 end)' \
           "$OUT/$task-$rep.json" 2>/dev/null)
