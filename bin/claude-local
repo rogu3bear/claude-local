@@ -20,22 +20,34 @@
 #   CLAUDE_LOCAL_AUTOCOMPACT  autocompact window in tokens
 #                             (default: server context - max output - 2048, floor 100000)
 #   CLAUDE_LOCAL_OFFLINE      1 = block all non-localhost network from Claude via a dead
-#                             HTTPS_PROXY (default 1); 0 = allow internet (MCP servers etc.)
+#                             HTTPS_PROXY; 0 = allow internet (default 0 since 2026-09-07 so that
+#                             WebFetch and the web search below work; was 1)
+#   CLAUDE_LOCAL_WEBSEARCH    1 = register config/mcp-websearch.py as an MCP server (default 1;
+#                             forced off when offline). Claude Code's built-in WebSearch is run by
+#                             Anthropic's API, so against a local server it returns nothing; the
+#                             MCP tool mcp__websearch__web_search (DuckDuckGo) replaces it.
 #   CLAUDE_LOCAL_PROMPT       append | replace | none  (default append)
 #                             append  = built-in prompt + system_prompt.md
 #                             replace = system_prompt_compact.md instead of the built-in prompt
 #   CLAUDE_LOCAL_SNAPSHOT     1 = --system-prompt-snapshot on + exclude dynamic sections (default 1)
-#   CLAUDE_LOCAL_TOOLS        comma list passed as --tools: the ONLY tools the model sees
-#                             (default Bash,Read,Edit,Write,Grep,Glob,Agent,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskList,TaskUpdate,TaskGet,TaskStop,TaskOutput,ProposeGoal,ReportFindings). Measured 2026-09-05: with the
-#                             full tool list a small local model burns ~30% of its turns on
-#                             meta-tools (ReportFindings, TaskList/Create/Update, Skill, subagents),
-#                             and the schemas cost ~5K prompt tokens. Set to "" for the full list.
+#   CLAUDE_LOCAL_TOOLS        comma list passed as --tools: the ONLY built-in tools the model sees
+#                             (MCP tools are added on top). Default since 2026-09-07: the core six
+#                             plus Agent, WebFetch, the todo/task tools, ProposeGoal and
+#                             ReportFindings (see TOOLS below), chosen for capability over speed.
+#                             Measured 2026-09-05: with the full tool list a small local model
+#                             burns ~30% of its turns on meta-tools and the schemas cost ~5K
+#                             prompt tokens; the benchmark keeps the core six. WebSearch is left
+#                             out on purpose (see CLAUDE_LOCAL_WEBSEARCH). Set to "" for the full list.
 #   CLAUDE_LOCAL_DISALLOWED_TOOLS  extra comma list passed as --disallowedTools (default none)
 #   CLAUDE_LOCAL_SAMPLING     JSON sampling override applied by the proxy to every request,
 #                             e.g. '{"temperature":0.7,"top_p":0.8,"top_k":20}' (default: none)
 #   CLAUDE_LOCAL_PROXY_DEBUG  1 = proxy also logs request params/tool count/system size
 #
-# Files in the config dir: backend-<name>.sh, picker.py, proxy.py,
+# Switching models: pick one in the menu at start, type `/model <preset>` mid-session
+# (llama-server router mode loads it on demand; the statusline follows Claude's choice),
+# or answer (a)nother in the post-exit menu.
+#
+# Files in the config dir: backend-<name>.sh, picker.py, proxy.py, mcp-websearch.py,
 # system_prompt.md, system_prompt_compact.md, statusline.sh, bench/.
 # Per-session state lives in run/<pid>/ and is exported as CLAUDE_LOCAL_SESSION_DIR.
 
@@ -53,7 +65,7 @@ USE_PROXY="${CLAUDE_LOCAL_PROXY:-1}"
 PROXY_PORT="${CLAUDE_LOCAL_PROXY_PORT:-$((PORT + 1))}"
 PROMPT_MODE="${CLAUDE_LOCAL_PROMPT:-append}"
 MAX_OUTPUT="${CLAUDE_LOCAL_MAX_OUTPUT:-8192}"
-TOOLS="${CLAUDE_LOCAL_TOOLS-Bash,Read,Edit,Write,Grep,Glob,Agent,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskList,TaskUpdate,TaskGet,TaskStop,TaskOutput,ProposeGoal,ReportFindings}"
+TOOLS="${CLAUDE_LOCAL_TOOLS-Bash,Read,Edit,Write,Grep,Glob,Agent,WebFetch,TodoWrite,TaskCreate,TaskList,TaskUpdate,TaskGet,TaskStop,TaskOutput,ProposeGoal,ReportFindings}"
 DISALLOWED_TOOLS="${CLAUDE_LOCAL_DISALLOWED_TOOLS-}"
 OFFLINE="${CLAUDE_LOCAL_OFFLINE:-0}"
 SNAPSHOT="${CLAUDE_LOCAL_SNAPSHOT:-1}"
@@ -195,6 +207,17 @@ fi
 [ -n "$TOOLS" ] && CLAUDE_FLAGS+=(--tools "$TOOLS")
 [ -n "$DISALLOWED_TOOLS" ] && CLAUDE_FLAGS+=(--disallowedTools "$DISALLOWED_TOOLS")
 
+# --- 6b. Web search as an MCP server ---------------------------------------------
+# --tools limits the built-in set only; MCP tools ride along. The built-in WebSearch
+# is executed by Anthropic's API and returns nothing against a local server, so the
+# model gets a DuckDuckGo tool instead (mcp__websearch__web_search).
+WEBSEARCH="${CLAUDE_LOCAL_WEBSEARCH:-1}"
+[ "$OFFLINE" = "1" ] && WEBSEARCH=0
+if [ "$WEBSEARCH" = "1" ]; then
+  printf '{"mcpServers":{"websearch":{"type":"stdio","command":"python3","args":["%s/mcp-websearch.py"]}}}\n' "$CONFIG_DIR" > "$SESSION_DIR/mcp.json"
+  CLAUDE_FLAGS+=(--mcp-config "$SESSION_DIR/mcp.json")
+fi
+
 # --- 7. Usage proxy (per-turn cache hit / tok/s for the statusline) ------------
 CLAUDE_BASE_URL="$BASE_URL"
 if [ "$USE_PROXY" = "1" ]; then
@@ -226,6 +249,7 @@ fi
 export CLAUDE_LOCAL_BACKEND="$BACKEND"
 export CLAUDE_LOCAL_TOOLS="${TOOLS}"
 export CLAUDE_LOCAL_OFFLINE="$OFFLINE"
+export CLAUDE_LOCAL_WEBSEARCH="$WEBSEARCH"
 export CLAUDE_LOCAL_SNAPSHOT="$SNAPSHOT"
 export ANTHROPIC_BASE_URL="$CLAUDE_BASE_URL"
 export ANTHROPIC_AUTH_TOKEN="$AUTH_TOKEN"
@@ -240,7 +264,7 @@ date +%s > "$SESSION_DIR/session_start"
 printf '%s' "$MODEL" > "$SESSION_DIR/session_model"
 printf '%s' "${AUTOCOMPACT:-}" > "$SESSION_DIR/context_max"   # statusline gauge ceiling
 
-say "Starting Claude Code: model=${MODEL} ctx=${CTX:-?} autocompact=${AUTOCOMPACT:-auto} max_output=${MAX_OUTPUT} prompt=${PROMPT_MODE} offline=${OFFLINE} via ${CLAUDE_BASE_URL} (config: ${CONFIG_DIR})"
+say "Starting Claude Code: model=${MODEL} ctx=${CTX:-?} autocompact=${AUTOCOMPACT:-auto} max_output=${MAX_OUTPUT} prompt=${PROMPT_MODE} offline=${OFFLINE} websearch=${WEBSEARCH} via ${CLAUDE_BASE_URL} (config: ${CONFIG_DIR})"
 # Claude Code reads Ctrl-C itself in raw terminal mode; ignoring INT here only
 # keeps this wrapper alive so the post-exit menu still runs.
 trap '' INT

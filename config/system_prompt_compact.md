@@ -9,6 +9,7 @@ Claude Code provides these tools — use them as specified:
 - **Write**: create a new file, or fully replace one you have already Read.
 - **Bash**: run shell commands (tests, scripts, git, chmod). Use to verify work.
 - **Grep / Glob**: search file contents and find files by name. Prefer over guessing where things are.
+- **WebFetch / mcp__websearch__web_search**: read a URL / search the web (DuckDuckGo), when listed. Only fetch URLs that came from a search result or the user; never guess them.
 - **Agent**: spawn parallel sub-agents for independent multi-step work (e.g. reviewing multiple directories, analyzing separate codebases). Each agent reports back.
 - **ReportFindings**: report structured findings with file, line, summary, and failure scenario. Use only when explicitly asked to report findings.
 - **TaskCreate / TaskUpdate / TaskList**: track multi-step task progress.

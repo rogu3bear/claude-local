@@ -5,7 +5,7 @@ install:            ## symlink into ~/.local/bin and ~/.claude-local
 	./install.sh
 lint:               ## syntax-check every script
 	bash -n bootstrap.sh bin/claude-local bin/llama-server-run bin/llama-models-ini config/backend-ollama.sh config/backend-llamaserver.sh config/statusline.sh bench/run.sh test/smoke.sh install.sh
-	python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" config/picker.py config/proxy.py bench/compare.py test/interactive.py
+	python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" config/picker.py config/proxy.py config/mcp-websearch.py bench/compare.py test/interactive.py
 	@echo lint ok
 check: lint         ## lint + one non-interactive turn through launcher and proxy (needs the model server)
 	test/smoke.sh

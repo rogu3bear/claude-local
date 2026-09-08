@@ -2,8 +2,9 @@
 # Install claude-local by symlinking this checkout into place.
 #   ~/.local/bin/claude-local      -> bin/claude-local
 #   ~/.local/bin/ollama            -> wrapper: sets OLLAMA_HOST from ~/.claude-local/env, execs ~/.local/ollama/bin/ollama
-#   ~/.claude-local/<file>         -> config/<file>   (adapters, picker, proxy, statusline, prompts, settings)
+#   ~/.claude-local/<file>         -> config/<file>   (adapters, picker, proxy, web search MCP, statusline, prompts, settings)
 #   ~/.local/bin/llama-server-run  -> bin/llama-server-run  (ExecStart of llama-server.service)
+#   ~/.local/bin/llama-models-ini  -> bin/llama-models-ini  (append new GGUFs to the router INI)
 #   ~/.claude-local/bench          -> bench/
 #   ~/.config/systemd/user/ollama.service.d/10-claude-local.conf   (copied if changed)
 #   ~/.config/systemd/user/ollama.service.d/20-gpu.conf            (copied from systemd/20-gpu-$GPU.conf if GPU given)
@@ -24,7 +25,8 @@ link() { # $1 = target, $2 = link path
 mkdir -p "$BIN" "$CONFIG"
 link "$HERE/bin/claude-local" "$BIN/claude-local"
 link "$HERE/bin/llama-server-run" "$BIN/llama-server-run"
-for f in backend-ollama.sh backend-llamaserver.sh picker.py proxy.py statusline.sh system_prompt.md system_prompt_compact.md settings.json; do
+link "$HERE/bin/llama-models-ini" "$BIN/llama-models-ini"
+for f in backend-ollama.sh backend-llamaserver.sh picker.py proxy.py mcp-websearch.py statusline.sh system_prompt.md system_prompt_compact.md settings.json; do
   link "$HERE/config/$f" "$CONFIG/$f"
 done
 link "$HERE/bench" "$CONFIG/bench"

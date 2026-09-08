@@ -66,27 +66,41 @@ else
   line1="${BOLD}$(basename "$cur_dir")${RESET}"
 fi
 
-# Server status + loaded model. Three states: online+model, online+empty, offline.
-model=""; resp=""
+# Server status + the model in use. The model comes from Claude Code's payload, so it
+# follows a mid-session `/model <preset>`; the server says whether it is resident.
+# States: online+loaded, online+loading, online+not loaded, online+empty, offline.
+session_model=$(cat "$SESSION_DIR/session_model" 2>/dev/null || echo "")
+want=$(printf '%s' "$input" | jq -r '.model.id // .model.display_name // empty' 2>/dev/null)
+[ -z "$want" ] && want="$session_model"
+model=""; resp=""; loaded=""; mstate=""
 BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"
 if [ "$BACKEND" = ollama ]; then
   resp=$(curl -s --max-time 1 "http://localhost:${PORT}/api/ps" 2>/dev/null)
-  [ -n "$resp" ] && model=$(printf '%s' "$resp" | jq -r '.models[0].name // empty' 2>/dev/null)
+  [ -n "$resp" ] && loaded=$(printf '%s' "$resp" | jq -r '[.models[].name] | join(",")' 2>/dev/null)
 else
-  resp=$(curl -sf --max-time 1 "http://localhost:${PORT}/v1/models" 2>/dev/null)
-  [ -n "$resp" ] && model=$(printf '%s' "$resp" | jq -r '.data[0].id // empty' 2>/dev/null)
-fi
-session_model=$(cat "$SESSION_DIR/session_model" 2>/dev/null || echo "")
-if [ -n "$model" ]; then
-  if [ -n "$session_model" ] && [ "$model" != "$session_model" ]; then
-    line1+="  ${GREEN}●${RESET} ${BOLD}${model}${RESET}${YELLOW}≠${RESET}${GREY}${session_model}${RESET}"
-  else
-    line1+="  ${GREEN}●${RESET} ${BOLD}${model}${RESET}"
+  resp=$(curl -sf --max-time 1 "http://localhost:${PORT}/models" 2>/dev/null)
+  if [ -n "$resp" ] && printf '%s' "$resp" | jq -e '.data[0].status != null' >/dev/null 2>&1; then   # router mode
+    loaded=$(printf '%s' "$resp" | jq -r '[.data[] | select(.status.value == "loaded") | .id] | join(",")' 2>/dev/null)
+    [ -n "$want" ] && mstate=$(printf '%s' "$resp" | jq -r --arg m "$want" '.data[] | select(.id == $m) | (.status.value // "unloaded")' 2>/dev/null)
+  elif [ -n "$resp" ]; then                                                                              # single-model server
+    loaded=$(printf '%s' "$resp" | jq -r '[.data[].id] | join(",")' 2>/dev/null)
   fi
-elif [ -n "$resp" ]; then
+fi
+if [ -n "$want" ] && [ -z "$mstate" ]; then
+  case ",$loaded," in *",$want,"*) mstate=loaded ;; *) mstate=unloaded ;; esac
+fi
+model="${want:-${loaded%%,*}}"
+if [ -z "$resp" ]; then
+  line1+="  ${RED}● offline${RESET}   ${RED}api down${RESET}"
+elif [ -z "$model" ]; then
   line1+="  ${YELLOW}● no model loaded${RESET} ${GREY}(idle)${RESET}"
 else
-  line1+="  ${RED}● offline${RESET}   ${RED}api down${RESET}"
+  case "$mstate" in
+    loaded)  line1+="  ${GREEN}●${RESET} ${BOLD}${model}${RESET}" ;;
+    loading) line1+="  ${YELLOW}◐${RESET} ${BOLD}${model}${RESET} ${YELLOW}loading${RESET}" ;;
+    *)       line1+="  ${YELLOW}●${RESET} ${BOLD}${model}${RESET} ${YELLOW}not loaded${RESET}" ;;
+  esac
+  [ -n "$session_model" ] && [ "$model" != "$session_model" ] && line1+=" ${GREY}(was ${session_model})${RESET}"
 fi
 
 src=$(cat "$SESSION_DIR/session_start" 2>/dev/null || echo "")

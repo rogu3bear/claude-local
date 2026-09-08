@@ -10,5 +10,10 @@
     "type": "command",
     "command": "/home/mln-dev/.claude-local/statusline.sh",
     "refreshInterval": 2
+  },
+  "permissions": {
+    "allow": [
+      "mcp__websearch__web_search"
+    ]
   }
 }

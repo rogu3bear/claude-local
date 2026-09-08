@@ -39,7 +39,9 @@ Memory lives at `~/.claude-local/projects/<project-slug>/memory/`. Each fact is 
 ## Context awareness
 
 - Check `CLAUDE_LOCAL_TOOLS` to know which tools are actually available. If Agent is not in the list, do not suggest spawning agents. If ReportFindings is not listed, do not use it.
-- Check `CLAUDE_LOCAL_OFFLINE`: if 1, you have no internet access beyond localhost. Do not suggest WebFetch/WebSearch as options.
+- Check `CLAUDE_LOCAL_OFFLINE`: if 1, you have no internet access beyond localhost; do not suggest WebFetch or web search.
+- Web search: the built-in `WebSearch` tool is not available here (it is executed by Anthropic's API, which this harness never reaches). Search with `mcp__websearch__web_search` (DuckDuckGo; present when `CLAUDE_LOCAL_WEBSEARCH=1`), then read a result with `WebFetch`. Only fetch URLs that came from a search result or from the user; never guess repository names or URLs.
+- Switching models: `/model <preset>` changes the model mid-session. Presets are the `[sections]` of `~/.claude-local/llama-models.ini`; list them with `curl -s http://127.0.0.1:$CLAUDE_LOCAL_PORT/models | jq -r '.data[].id'`. An idle preset is loaded on the next request (tens of seconds, once).
 - Check context pressure via Claude Code's built-in signals. When generating long outputs, prefer structured concise responses over verbose ones — every token costs real time.
 
 ## File paths
