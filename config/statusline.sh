@@ -162,6 +162,22 @@ if [ -n "$usage_line" ]; then
   fi
 fi
 
+# Error badge: the last error/warn event of this session (events.jsonl, written by the proxy,
+# the launcher and the audit hook) while it is younger than 10 min, plus the session's error
+# count. "!! turn_failed 500 template" is what a "waiting for API" retry loop looks like here.
+if [ -s "$SESSION_DIR/events.jsonl" ]; then
+  ev_line=$(grep -E '"level": "(error|warn)"' "$SESSION_DIR/events.jsonl" 2>/dev/null | tail -n 1)
+  if [ -n "$ev_line" ]; then
+    read -r ev_ts ev_lvl ev_kind ev_x1 ev_x2 <<<"$(printf '%s' "$ev_line" | jq -r '[(.ts|floor), .level, .kind, (.status // .err_class // .div // .tool // "" | tostring), (.err_class // .cache_pct // .reason // "" | tostring | .[0:28])] | @tsv' 2>/dev/null | tr '\t' ' ')"
+    if [ -n "${ev_ts:-}" ] && [ $(( now - ev_ts )) -lt 600 ]; then
+      n_err=$(grep -c '"level": "error"' "$SESSION_DIR/events.jsonl" 2>/dev/null || echo 0)
+      badge="${ev_kind}${ev_x1:+ $ev_x1}${ev_x2:+ $ev_x2}"
+      if [ "$ev_lvl" = error ]; then line2+="  ${RED}!! ${badge}${RESET}${GREY} (${n_err} err)${RESET}"
+      else line2+="  ${YELLOW}! ${badge}${RESET}"; fi
+    fi
+  fi
+fi
+
 # ------------------------------------------------------------------ L3 ----
 # Context pressure gauge.
 line3=""

@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""claude-local-doctor: read-only diagnosis of the claude-local stack.
+
+Prints one line per check (PASS / WARN / FAIL) with a hint for everything that is not a pass,
+then a summary. Never restarts, kills or edits anything, so it is safe to run next to a live
+session (it does not touch the model slot either).
+
+    claude-local-doctor                 # everything, last 24h of logs
+    claude-local-doctor --since 2h      # log window (s/m/h/d)
+    claude-local-doctor --quiet         # only WARN/FAIL lines
+    claude-local-doctor --json          # machine-readable list of checks
+    make doctor
+
+Sections: install (symlinks, settings, syntax, claude), env, server (unit, journal, health,
+router presets, INI vs GGUF files, drop-in applied?), gpu/memory/disk, sessions (live launchers,
+orphan proxies, ports, ledger), logs (events.jsonl summary, tool denials/failures, Claude's own
+API-error transcript lines, cache hit rate of live sessions). Exit status 1 when any FAIL.
+"""
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+CONFIG = os.environ.get("CLAUDE_LOCAL_CONFIG") or os.path.expanduser("~/.claude-local")
+HOME = os.path.expanduser("~")
+sys.path.insert(0, CONFIG)
+try:
+    import clog
+except ImportError:
+    clog = None
+
+ARGS = sys.argv[1:]
+QUIET = "--quiet" in ARGS
+JSON = "--json" in ARGS
+since_s = 24 * 3600
+if "--since" in ARGS:
+    v = ARGS[ARGS.index("--since") + 1]
+    since_s = int(v[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[v[-1]]
+SINCE = time.time() - since_s
+results = []
+
+
+def rep(status, section, check, detail="", hint=""):
+    results.append({"status": status, "section": section, "check": check, "detail": detail, "hint": hint})
+    if JSON:
+        return
+    if QUIET and status == "PASS":
+        return
+    col = {"PASS": "\033[32m", "WARN": "\033[33m", "FAIL": "\033[31m", "INFO": "\033[36m"}[status]
+    print(f"{col}{status:4}\033[0m {section:8} {check}{': ' + detail if detail else ''}")
+    if hint and status in ("WARN", "FAIL"):
+        print(f"     \033[2m-> {hint}\033[0m")
+
+
+def sh(cmd, timeout=10):
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return 1, ""
+
+
+def http_json(url, timeout=3):
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except Exception as e:  # noqa: BLE001
+        return None, {"error": str(e)}
+
+
+def env_file():
+    rc, out = sh(f'. "{CONFIG}/env" 2>/dev/null; echo "$CLAUDE_LOCAL_BACKEND|$CLAUDE_LOCAL_PORT|$CLAUDE_LOCAL_OLLAMA_PORT|$CLAUDE_LOCAL_LLAMASERVER_PORT"')
+    b, p, op, lp = (out.split("|") + ["", "", "", ""])[:4]
+    b = os.environ.get("CLAUDE_LOCAL_BACKEND") or b or "ollama"
+    op = op or "1234"; lp = lp or "1244"
+    p = os.environ.get("CLAUDE_LOCAL_PORT") or p or (lp if b == "llamaserver" else op)
+    return b, p, op, lp
+
+
+# ------------------------------------------------------------------ install ----
+def check_install():
+    repo = None
+    if os.path.islink(os.path.join(CONFIG, "proxy.py")):
+        repo = os.path.dirname(os.path.dirname(os.path.realpath(os.path.join(CONFIG, "proxy.py"))))
+    rep("PASS" if os.path.isdir(CONFIG) else "FAIL", "install", "config dir", CONFIG, "run ./bootstrap.sh")
+    files = ["backend-ollama.sh", "backend-llamaserver.sh", "picker.py", "proxy.py", "clog.py", "mcp-websearch.py",
+             "hook-urlguard.py", "hook-audit.py", "statusline.sh", "system_prompt.md", "system_prompt_compact.md", "settings.json"]
+    missing = [f for f in files if not os.path.exists(os.path.join(CONFIG, f))]
+    dangling = [f for f in files if os.path.islink(os.path.join(CONFIG, f)) and not os.path.exists(os.path.realpath(os.path.join(CONFIG, f)))]
+    rep("FAIL" if missing or dangling else "PASS", "install", "config files linked",
+        f"{len(files) - len(missing)}/{len(files)}" + (f" missing={missing}" if missing else "") + (f" dangling={dangling}" if dangling else ""),
+        "make install (re-links the checkout into ~/.claude-local)")
+    bins = ["claude-local", "llama-server-run", "llama-models-ini", "claude-local-doctor"]
+    mb = [b for b in bins if not shutil.which(b) and not os.path.exists(os.path.join(HOME, ".local/bin", b))]
+    rep("WARN" if mb else "PASS", "install", "commands on PATH", f"missing={mb}" if mb else ", ".join(bins), "make install; ensure ~/.local/bin is on PATH")
+    try:
+        st = json.load(open(os.path.join(CONFIG, "settings.json")))
+        sl = (st.get("statusLine") or {}).get("command", "")
+        sl_ok = bool(sl) and os.access(os.path.expandvars(sl.split()[0]), os.X_OK)
+        rep("PASS" if sl_ok else "WARN", "install", "statusline command", sl or "(none)", "statusLine.command must point at an executable statusline.sh")
+        hooks = st.get("hooks") or {}
+        hook_cmds = [h.get("command", "") for ev in hooks.values() for grp in ev for h in grp.get("hooks", [])]
+        bad = []
+        for c in hook_cmds:
+            path = re.sub(r'^python3\s+"?', "", c).strip('"').replace("$HOME", HOME)
+            if not os.path.exists(path):
+                bad.append(path)
+        rep("FAIL" if bad else "PASS", "install", "hooks resolve", f"{len(hook_cmds)} hooks" + (f" missing={bad}" if bad else ""), "a missing hook script blocks every matching tool call")
+        want = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+        have = set(hooks)
+        rep("PASS" if want <= have else "WARN", "install", "audit hooks wired", ",".join(sorted(have)) or "none",
+            "config/settings.json should register hook-audit.py for PreToolUse, PostToolUse and PostToolUseFailure")
+        allow = set((st.get("permissions") or {}).get("allow") or [])
+        rep("PASS" if "mcp__websearch__web_search" in allow else "WARN", "install", "web search pre-allowed", ",".join(sorted(allow)), "add mcp__websearch__web_search to permissions.allow or every search prompts")
+    except (OSError, ValueError) as e:
+        rep("FAIL", "install", "settings.json", str(e), "fix the JSON; Claude Code refuses to start on a broken settings file")
+    if repo and os.path.isdir(repo):
+        rc, out = sh(f'cd "{repo}" && make -s lint 2>&1 | tail -3', timeout=60)
+        rep("PASS" if rc == 0 else "FAIL", "install", "scripts parse (make lint)", out.splitlines()[-1] if out else "", f"cd {repo} && make lint")
+        rc, out = sh(f'cd "{repo}" && git status --porcelain 2>/dev/null | wc -l && git log -1 --format=%h_%cd --date=short 2>/dev/null')
+        lines = out.splitlines()
+        if len(lines) == 2:
+            rep("INFO", "install", "checkout", f"{repo} @ {lines[1]}" + (f", {lines[0]} uncommitted files" if lines[0].strip() != "0" else ", clean"))
+    rc, out = sh("claude --version 2>/dev/null")
+    rep("PASS" if rc == 0 else "FAIL", "install", "claude", out or "not found", "install Claude Code (npm i -g @anthropic-ai/claude-code)")
+    cj = os.path.join(CONFIG, ".claude.json")
+    if os.path.exists(cj):
+        try:
+            json.load(open(cj)); rep("PASS", "install", ".claude.json parses")
+        except ValueError as e:
+            rep("FAIL", "install", ".claude.json", str(e), "corrupt state file; restore from ~/.claude-local/backups")
+
+
+# ---------------------------------------------------------------------- env ----
+def check_env():
+    b, p, op, lp = env_file()
+    ok = os.path.exists(os.path.join(CONFIG, "env"))
+    rep("PASS" if ok else "WARN", "env", "env file", f"backend={b} port={p} ollama={op} llamaserver={lp}", "bootstrap writes ~/.claude-local/env; without it the launcher assumes ollama:1234")
+    adapter = os.path.join(CONFIG, f"backend-{b}.sh")
+    rep("PASS" if os.path.exists(adapter) else "FAIL", "env", "backend adapter", adapter, "CLAUDE_LOCAL_BACKEND must be ollama or llamaserver")
+    for k in ("CLAUDE_LOCAL_PROXY", "CLAUDE_LOCAL_OFFLINE", "CLAUDE_LOCAL_TOOLS", "CLAUDE_LOCAL_MODEL", "ANTHROPIC_BASE_URL"):
+        if os.environ.get(k) is not None:
+            rep("INFO", "env", f"{k} set in this shell", os.environ[k][:80])
+    return b, p, op, lp
+
+
+# ------------------------------------------------------------------- server ----
+def unit_info(unit):
+    rc, out = sh(f"systemctl --user show {unit} -p ActiveState -p SubState -p NRestarts -p MainPID -p ExecMainStartTimestamp -p Result 2>/dev/null")
+    d = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+    return d if d.get("ActiveState") else None
+
+
+def journal_errors(unit):
+    """Real errors only: the server's E-level lines, exceptions it returned to a client, and
+    systemd's exit/failure records. W-level chatter (CORS notice, template notes) is left out."""
+    rc, out = sh(f"journalctl --user -u {unit} --since '-{since_s}s' --no-pager -o cat 2>/dev/null"
+                 " | sed -E 's/^\\[[0-9]+\\] //; s/^[0-9.]+ //'"
+                 " | grep -E '^(E |.*Failed with result|.*Main process exited|W srv +operator\\(\\): got exception|.*making room for prompt cache)'"
+                 " | cut -c1-150 | sort | uniq -c | sort -rn | head -6", timeout=30)
+    return out
+
+
+def gguf_ok(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"GGUF", os.path.getsize(path)
+    except OSError:
+        return False, 0
+
+
+def check_llamaserver(port):
+    unit = "llama-server.service"
+    ui = unit_info(unit)
+    if not ui:
+        rep("FAIL", "server", "llama-server.service", "no such user unit", "./bootstrap.sh --backend llamaserver installs it")
+        return
+    st = f"{ui.get('ActiveState')}/{ui.get('SubState')} since {ui.get('ExecMainStartTimestamp', '?')}, restarts={ui.get('NRestarts')}, result={ui.get('Result')}"
+    rep("PASS" if ui.get("ActiveState") == "active" else "FAIL", "server", "unit", st, "systemctl --user start llama-server.service; journalctl --user -u llama-server.service -e")
+    if int(ui.get("NRestarts") or 0) > 0:
+        rep("WARN", "server", "unit restarted by systemd", f"{ui['NRestarts']} times since it was last started by hand", "it crashed; see the journal errors below")
+    je = journal_errors(unit)
+    rep("WARN" if je else "PASS", "server", f"journal errors ({since_s // 3600}h)", "\n       " + je.replace("\n", "\n       ") if je else "none",
+        "the server's own error lines in the window (count, message); a crash loop shows as many 'Failed with result'")
+    rc, notes = sh(f"journalctl --user -u {unit} --since '-{since_s}s' --no-pager -o cat 2>/dev/null | grep -E 'W srv +(load_model|init): ' | sed -E 's/^\\[[0-9]+\\] [0-9.]+ //' | sort -u | head -3", timeout=30)
+    if notes:
+        rep("INFO", "server", "server notes", "\n       " + notes.replace("\n", "\n       "))
+    code, health = http_json(f"http://127.0.0.1:{port}/health")
+    rep("PASS" if code == 200 else "FAIL", "server", f"/health on {port}", str(code) if code else health.get("error", ""),
+        "503 = still loading (wait), no answer = unit down or wrong port in ~/.claude-local/env")
+    code, models = http_json(f"http://127.0.0.1:{port}/models", 5)
+    data = (models or {}).get("data") or []
+    router = bool(data) and data[0].get("status") is not None
+    if code != 200:
+        rep("FAIL", "server", "/models", str(models.get("error", ""))[:100], "the server is up but the OpenAI-compatible listing failed")
+        return
+    loaded = [d["id"] for d in data if (d.get("status") or {}).get("value") == "loaded"]
+    failed = [d["id"] for d in data if (d.get("status") or {}).get("failed")]
+    loading = [d["id"] for d in data if (d.get("status") or {}).get("value") == "loading"]
+    rep("INFO", "server", "mode", "router" if router else "single-model", "")
+    rep("PASS" if not failed else "FAIL", "server", "presets", f"{len(data)} listed, loaded={loaded or '-'} loading={loading or '-'} failed={failed or '-'}",
+        "a failed preset died on load: bad path, truncated GGUF or out of memory; journalctl --user -u llama-server.service -e, then curl ':PORT/models?reload=1'")
+    # INI vs files vs router
+    rc, ini_path = sh(f'. "{CONFIG}/llama-server.env" 2>/dev/null; echo "${{LLAMA_ARG_MODELS_PRESET:-{CONFIG}/llama-models.ini}}"')
+    ini_path = ini_path or os.path.join(CONFIG, "llama-models.ini")
+    if os.path.exists(ini_path):
+        sections, cur, problems = {}, None, []
+        for line in open(ini_path, encoding="utf-8", errors="replace"):
+            line = line.strip()
+            if line.startswith("[") and line.endswith("]"):
+                cur = line[1:-1]
+                if cur != "*":
+                    sections[cur] = None
+                    if ":" in cur:
+                        problems.append(f"'{cur}' contains a colon (canonicalised as a quant tag)")
+            elif cur and cur != "*" and re.match(r"^model\s*=", line):
+                sections[cur] = line.split("=", 1)[1].strip()
+        for name, path in sections.items():
+            if not path:
+                problems.append(f"[{name}] has no model= line"); continue
+            if not os.path.exists(path):
+                problems.append(f"[{name}] model file missing: {path}"); continue
+            ok, size = gguf_ok(path)
+            if not ok:
+                problems.append(f"[{name}] not a GGUF (bad magic): {path}")
+            elif size < 500_000_000:
+                problems.append(f"[{name}] suspiciously small ({size // 1_000_000} MB): truncated download?")
+            if os.path.exists(path + ".part") or os.path.exists(path + ".aria2"):
+                problems.append(f"[{name}] download still in progress ({path}.part)")
+        paths = [p for p in sections.values() if p]
+        dups = {p for p in paths if paths.count(p) > 1}
+        if dups:
+            problems.append(f"same GGUF in several sections: {sorted(dups)}")
+        rep("FAIL" if any("missing" in p or "GGUF" in p for p in problems) else ("WARN" if problems else "PASS"), "server",
+            f"INI {os.path.basename(ini_path)}", f"{len(sections)} presets" + ("; " + "; ".join(problems) if problems else ""),
+            "fix the section, then curl -s 'http://127.0.0.1:%s/models?reload=1'" % port)
+        if router:
+            ini_set, srv_set = set(sections), {d["id"] for d in data}
+            if ini_set != srv_set:
+                rep("WARN", "server", "INI not reloaded", f"only in INI={sorted(ini_set - srv_set)} only on server={sorted(srv_set - ini_set)}",
+                    f"curl -s 'http://127.0.0.1:{port}/models?reload=1' >/dev/null")
+    else:
+        rep("WARN" if router else "INFO", "server", "INI", f"{ini_path} not found", "llama-models-ini writes one from ~/.claude-local/models")
+    # drop-in applied to the running process?
+    pid = ui.get("MainPID")
+    dropins = glob.glob(os.path.join(HOME, ".config/systemd/user/llama-server.service.d/*.conf"))
+    want = {}
+    for f in dropins:
+        for line in open(f):
+            m = re.match(r"^Environment=([A-Z_]+)=(.*)$", line.strip())
+            if m:
+                want[m.group(1)] = m.group(2)
+    try:
+        envb = open(f"/proc/{pid}/environ", "rb").read().split(b"\0")
+        have = dict(e.decode("utf-8", "replace").split("=", 1) for e in envb if b"=" in e)
+        diff = {k: (have.get(k), v) for k, v in want.items() if have.get(k) != v}
+        rep("WARN" if diff else "PASS", "server", "drop-in applied to the running unit",
+            f"{len(want)} settings" + (f"; differ (running -> file): {diff}" if diff else ""),
+            "the drop-in changed after the unit started: systemctl --user restart llama-server.service when no session is live")
+        ctx = int(have.get("LLAMA_ARG_CTX_SIZE") or 0)
+        if ctx:
+            room = ctx - 16384 - 2048
+            rep("PASS" if room >= 100000 else "WARN", "server", "context vs autocompact", f"ctx={ctx} -> autocompact {room}",
+                "Claude's autocompact floor is 100000: raise LLAMA_ARG_CTX_SIZE or lower CLAUDE_LOCAL_MAX_OUTPUT or long sessions truncate")
+        np_ = have.get("LLAMA_ARG_N_PARALLEL", "1")
+        rep("INFO", "server", "slots per model", f"-np {np_}: subagents and a parent share {'one slot and evict each other' if np_ == '1' else 'slots'}")
+    except OSError:
+        rep("INFO", "server", "drop-in check", "cannot read the unit's environment", "")
+    # slot files
+    slots = glob.glob(os.path.join(CONFIG, "slots", "*.bin"))
+    total = sum(os.path.getsize(s) for s in slots)
+    known = {f"claude-local-{re.sub(r'[^A-Za-z0-9._-]', '_', d['id'])}.bin" for d in data}
+    orphans = [os.path.basename(s) for s in slots if os.path.basename(s) not in known]
+    rep("INFO" if not orphans else "WARN", "server", "slot checkpoints", f"{len(slots)} files, {total / 1e9:.1f} GB" + (f"; not matching any preset: {orphans}" if orphans else ""),
+        "orphan slot files are safe to delete (rm ~/.claude-local/slots/<file>)")
+
+
+def check_ollama(port):
+    ui = unit_info("ollama.service")
+    if ui:
+        rep("PASS" if ui.get("ActiveState") == "active" else "FAIL", "server", "ollama.service", f"{ui.get('ActiveState')} restarts={ui.get('NRestarts')}", "systemctl --user start ollama.service")
+        je = journal_errors("ollama.service")
+        if je:
+            rep("WARN", "server", f"ollama journal errors ({since_s // 3600}h)", "\n       " + je.replace("\n", "\n       "), "")
+    code, tags = http_json(f"http://127.0.0.1:{port}/api/tags")
+    rep("PASS" if code == 200 else "FAIL", "server", f"/api/tags on {port}", f"{len((tags or {}).get('models') or [])} models" if code == 200 else tags.get("error", ""), "ollama not answering")
+    code, ps = http_json(f"http://127.0.0.1:{port}/api/ps")
+    if code == 200:
+        rep("INFO", "server", "ollama resident", ",".join(m["name"] for m in ps.get("models") or []) or "none")
+
+
+def check_server(b, p, op, lp):
+    if b == "llamaserver":
+        check_llamaserver(p)
+        code, ps = http_json(f"http://127.0.0.1:{op}/api/ps", 2)
+        if code == 200 and ps.get("models"):
+            rep("WARN", "server", "Ollama also holds a model", ",".join(m["name"] for m in ps["models"]),
+                "two servers on one GPU pool; the launcher evicts it at start (CLAUDE_LOCAL_EXCLUSIVE=1)")
+    else:
+        check_ollama(p)
+        code, m = http_json(f"http://127.0.0.1:{lp}/models", 2)
+        loaded = [d["id"] for d in (m or {}).get("data") or [] if (d.get("status") or {}).get("value") == "loaded"]
+        if loaded:
+            rep("WARN", "server", "llama-server also holds a model", ",".join(loaded), "two servers on one GPU pool")
+
+
+# ------------------------------------------------------------- gpu / memory ----
+def check_host():
+    mem = dict(l.split(":") for l in open("/proc/meminfo").read().splitlines() if ":" in l)
+    kb = lambda k: int(mem.get(k, "0").split()[0])  # noqa: E731
+    avail, total, swap_used = kb("MemAvailable") // 1024, kb("MemTotal") // 1024, (kb("SwapTotal") - kb("SwapFree")) // 1024
+    rep("PASS" if avail > 8192 else "WARN", "host", "memory", f"{avail} MB available of {total} MB, swap used {swap_used} MB",
+        "under 8 GB available: unload a model (post-exit menu) or lower LLAMA_ARG_CACHE_RAM")
+    if swap_used > 2048:
+        rep("WARN", "host", "swap in use", f"{swap_used} MB", "the model or the RAM prompt cache is being paged out; decode will crawl")
+    gtt = glob.glob("/sys/class/drm/card*/device/mem_info_gtt_used")
+    vram = glob.glob("/sys/class/drm/card*/device/mem_info_vram_used")
+    if gtt:
+        g = int(open(gtt[0]).read()) // 2**20; v = int(open(vram[0]).read()) // 2**20 if vram else 0
+        rep("INFO", "host", "gpu memory", f"gtt {g} MB, vram {v} MB in use")
+    busy = glob.glob("/sys/class/drm/card*/device/gpu_busy_percent")
+    rep("PASS" if busy else "WARN", "host", "gpu busy readable", open(busy[0]).read().strip() + "%" if busy else "no gpu_busy_percent", "the statusline's thinking indicator needs it")
+    rc, out = sh(f"journalctl -k --since '-{since_s}s' --no-pager -o cat 2>/dev/null | grep -iE 'amdgpu.*(ring .* timeout|gpu reset|page fault|fault detected|\\[drm:.*ERROR)|oom-kill|Out of memory: Killed' | tail -5", timeout=20)
+    rep("WARN" if out else "PASS", "host", f"kernel gpu/oom events ({since_s // 3600}h)", "\n       " + out.replace("\n", "\n       ") if out else "none",
+        "GPU resets or OOM kills in the window: the model instance died under load; see ~/provision notes on amdgpu.lockup_timeout")
+    du = shutil.disk_usage(CONFIG)
+    rep("PASS" if du.free > 20 * 2**30 else "WARN", "host", "disk free (config dir)", f"{du.free // 2**30} GB", "slot checkpoints and GGUFs live here")
+    rc, out = sh("ss -tlnp 2>/dev/null | awk 'NR>1 && $4 ~ /:12[3-6][0-9]$/ {split($4,a,\":\"); match($6,/\"[^\"]+\"/); print a[length(a)], substr($6,RSTART+1,RLENGTH-2)}' | sort -n")
+    rep("INFO", "host", "listening 1230-1269", out.replace("\n", ", ") or "nothing")
+
+
+# ----------------------------------------------------------------- sessions ----
+def alive(pid):
+    try:
+        os.kill(int(pid), 0); return True
+    except (OSError, ValueError):
+        return False
+
+
+def check_sessions():
+    run = os.path.join(CONFIG, "run")
+    live, stale = [], []
+    for d in glob.glob(os.path.join(run, "*")):
+        p = os.path.basename(d)
+        if not p.isdigit():
+            continue
+        (live if alive(p) else stale).append(d)
+    det = []
+    for d in live:
+        model = open(os.path.join(d, "session_model")).read().strip() if os.path.exists(os.path.join(d, "session_model")) else "?"
+        start = int(open(os.path.join(d, "session_start")).read()) if os.path.exists(os.path.join(d, "session_start")) else 0
+        rows = sum(1 for _ in open(os.path.join(d, "usage.jsonl"))) if os.path.exists(os.path.join(d, "usage.jsonl")) else 0
+        errs = sum(1 for l in open(os.path.join(d, "events.jsonl")) if '"level": "error"' in l) if os.path.exists(os.path.join(d, "events.jsonl")) else 0
+        det.append(f"pid {os.path.basename(d)} {model} {int((time.time() - start) / 60) if start else '?'}min {rows} turns {errs} errors")
+    rep("INFO", "sessions", "live launchers", "; ".join(det) or "none")
+    rep("PASS" if not stale else "WARN", "sessions", "stale session dirs", f"{len(stale)}" if stale else "none", "left by crashed launchers; the next claude-local start reaps them")
+    rc, out = sh("pgrep -af 'python3 .*proxy\\.py' | grep -v pgrep")
+    orphans = []
+    for line in out.splitlines():
+        pid = line.split()[0]
+        rc2, ppid = sh(f"ps -o ppid= -p {pid}")
+        rc3, penv = sh(f"tr '\\0' '\\n' < /proc/{pid}/environ 2>/dev/null | grep -E '^(USAGE_LOG|PROXY_PORT)=' | tr '\\n' ' '")
+        sess_dir = re.search(r"USAGE_LOG=(\S+)/usage.jsonl", penv)
+        launcher = os.path.basename(sess_dir.group(1)) if sess_dir else None
+        if not launcher or not launcher.isdigit() or not alive(launcher) or not os.path.isdir(sess_dir.group(1)):
+            if "claude-local-" not in penv:      # tests run their own throwaway proxies
+                orphans.append(f"pid {pid} ({penv.strip()[:60]})")
+    rep("WARN" if orphans else "PASS", "sessions", "orphan proxies", "; ".join(orphans) if orphans else "none",
+        "a proxy whose launcher is gone keeps a port and may checkpoint stale slots: kill <pid>")
+    led = os.path.join(run, "last_use.json")
+    if os.path.exists(led):
+        try:
+            d = json.load(open(led))
+            future = {k: v for k, v in d.items() if v > time.time() + 60}
+            rep("WARN" if future else "PASS", "sessions", "idle-unload ledger", ", ".join(f"{k} {int((time.time() - v) / 60)}min ago" for k, v in d.items()),
+                "timestamps in the future stop idle-unload from ever firing")
+        except ValueError:
+            rep("WARN", "sessions", "idle-unload ledger", "not JSON", f"rm {led}")
+
+
+# -------------------------------------------------------------------- drain ----
+def check_drain():
+    """Do models leave memory when nobody uses them? Timer installed and firing, and the drain
+    command's own verdicts for what is resident right now."""
+    rc, out = sh("systemctl --user is-active claude-local-drain.timer 2>/dev/null")
+    rep("PASS" if out == "active" else "FAIL", "drain", "claude-local-drain.timer", out or "not installed",
+        "make install enables it; without it nothing unloads models once the last session has exited")
+    rc, out = sh("systemctl --user show claude-local-drain.timer -p LastTriggerUSec -p NextElapseUSecRealtime 2>/dev/null")
+    if out:
+        d = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+        rep("INFO", "drain", "timer", f"last {d.get('LastTriggerUSec') or 'never'}, next {d.get('NextElapseUSecRealtime') or '?'}")
+    rc, out = sh("systemctl --user show claude-local-drain.service -p Result -p ExecMainStatus 2>/dev/null")
+    if out and "Result=success" not in out and "Result=" in out:
+        rep("WARN", "drain", "last drain run", out.replace("\n", " "), "journalctl --user -u claude-local-drain.service -e")
+    drain = shutil.which("claude-local-drain") or os.path.join(HOME, ".local/bin/claude-local-drain")
+    rc, out = sh(f'"{drain}" --status --json 2>/dev/null', timeout=30)
+    try:
+        st = json.loads(out)
+    except ValueError:
+        rep("WARN", "drain", "claude-local-drain --status", "no output", "make install")
+        return
+    models = st.get("models") or []
+    pending = [m for m in models if m["verdict"] == "drain"]
+    kept = [f"{m['model']} ({m['verdict']}, idle {m['age_s']}s)" for m in models if m["verdict"] != "drain"]
+    rep("INFO", "drain", "resident", "; ".join(kept) or "nothing", "")
+    rep("WARN" if pending else "PASS", "drain", "overdue for unload",
+        "; ".join(f"{m['model']} idle {m['age_s']}s" for m in pending) if pending else "none",
+        "past the threshold and still resident: the timer is not firing (see above) or the unload fails; run claude-local-drain by hand")
+    if clog:
+        evs = [e for e in clog.read_events(since=SINCE) if e.get("src") == "drain"]
+        n_ok = sum(1 for e in evs if e["kind"] == "drain_unload"); n_bad = sum(1 for e in evs if e["kind"] == "drain_failed")
+        rep("WARN" if n_bad else "INFO", "drain", f"drains in window", f"{n_ok} unloaded, {n_bad} failed", "journalctl --user -u claude-local-drain.service -e")
+
+
+# --------------------------------------------------------------------- logs ----
+def check_logs():
+    if not clog:
+        rep("WARN", "logs", "clog.py", "not importable from the config dir", "make install")
+        return
+    evs = list(clog.read_events(since=SINCE))
+    by = {}
+    for e in evs:
+        by.setdefault((e.get("level"), e.get("kind")), []).append(e)
+    errs = {k: v for k, v in by.items() if k[0] == "error"}
+    warns = {k: v for k, v in by.items() if k[0] == "warn"}
+    rep("PASS" if not errs else "FAIL", "logs", f"error events ({since_s // 3600}h)",
+        ", ".join(f"{k[1]} x{len(v)}" for k, v in sorted(errs.items(), key=lambda kv: -len(kv[1]))) or "none",
+        "each kind below shows its last occurrence and the recorded hint")
+    for (lvl, kind), v in sorted(errs.items(), key=lambda kv: -len(kv[1]))[:6]:
+        last = v[-1]
+        detail = " ".join(f"{k}={str(last[k])[:80]}" for k in ("status", "err_class", "err_msg", "model", "error", "tool", "summary") if k in last)
+        rep("INFO", "logs", f"  last {kind}", f"{time.strftime('%m-%d %H:%M', time.localtime(last['ts']))} {detail}", "")
+        if last.get("hint") and not QUIET:
+            print(f"     \033[2m-> {last['hint']}\033[0m")
+    rep("PASS" if not warns else "WARN", "logs", f"warning events ({since_s // 3600}h)",
+        ", ".join(f"{k[1]} x{len(v)}" for k, v in sorted(warns.items(), key=lambda kv: -len(kv[1]))) or "none", "")
+    cm = by.get(("warn", "cache_miss")) or []
+    if cm:
+        divs = {}
+        for e in cm:
+            divs[e.get("div", "?").split("[")[0]] = divs.get(e.get("div", "?").split("[")[0], 0) + 1
+        rep("WARN", "logs", "cache misses by cause", ", ".join(f"{k} x{v}" for k, v in sorted(divs.items(), key=lambda kv: -kv[1])),
+            cm[-1].get("hint", ""))
+    den = by.get(("warn", "tool_denied")) or []
+    if den:
+        rep("INFO", "logs", "tool calls refused by the guard", "; ".join(f"{e.get('tool')}: {str(e.get('summary'))[:50]}" for e in den[-4:]))
+    tf = by.get(("warn", "tool_failed")) or []
+    if tf:
+        tools = {}
+        for e in tf:
+            tools[e.get("tool")] = tools.get(e.get("tool"), 0) + 1
+        rep("INFO", "logs", "failed tool calls", ", ".join(f"{k} x{v}" for k, v in tools.items()))
+    # Claude Code's own view: API error lines in transcripts
+    n, texts = 0, {}
+    for f in glob.glob(os.path.join(CONFIG, "projects", "*", "*.jsonl")):
+        try:
+            if os.path.getmtime(f) < SINCE:
+                continue
+            for line in open(f, encoding="utf-8", errors="replace"):
+                if '"isApiErrorMessage":true' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                ts = d.get("timestamp", "")
+                try:
+                    import datetime
+                    t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                except ValueError:
+                    t = time.time()
+                if t < SINCE:
+                    continue
+                c = (d.get("message") or {}).get("content")
+                txt = c[0].get("text", "") if isinstance(c, list) and c and isinstance(c[0], dict) else str(c)
+                key = " ".join(txt.split())[:110]
+                texts[key] = texts.get(key, 0) + 1
+                n += 1
+        except OSError:
+            continue
+    rep("PASS" if n == 0 else "WARN", "logs", f"API errors shown to the user ({since_s // 3600}h)", str(n) if n else "none",
+        "what Claude Code printed in the session; the proxy's turn_failed events above say why")
+    for k, v in sorted(texts.items(), key=lambda kv: -kv[1])[:4]:
+        rep("INFO", "logs", f"  x{v}", k)
+    # cache health of live sessions
+    rows = []
+    for f in glob.glob(os.path.join(CONFIG, "run", "*", "usage.jsonl")):
+        rows += [json.loads(l) for l in open(f) if l.strip()]
+    rows = [r for r in rows if r.get("ts", 0) >= SINCE and r.get("prompt", 0) >= 4000]
+    if rows:
+        pcts = sorted(r.get("cache_pct", 0) for r in rows)
+        med = pcts[len(pcts) // 2]
+        rep("PASS" if med >= 50 else "WARN", "logs", "prefix cache hit (live sessions, prompts >= 4K)", f"median {med}% over {len(rows)} turns",
+            "below 50% every turn re-prefills the prompt; see the cache_miss causes above (test/prefix.py reproduces offline)")
+
+
+def main():
+    t0 = time.time()
+    if not JSON:
+        print(f"claude-local-doctor  {time.strftime('%Y-%m-%d %H:%M:%S')}  config={CONFIG}  window={since_s // 3600}h")
+    check_install()
+    b, p, op, lp = check_env()
+    check_server(b, p, op, lp)
+    check_host()
+    check_sessions()
+    check_drain()
+    check_logs()
+    n = {s: sum(1 for r in results if r["status"] == s) for s in ("PASS", "WARN", "FAIL")}
+    if JSON:
+        print(json.dumps({"checks": results, "summary": n}, indent=1))
+    else:
+        print(f"\n{n['PASS']} pass, {n['WARN']} warn, {n['FAIL']} fail  ({time.time() - t0:.1f}s)")
+    if clog:
+        clog.event("doctor_run", "info", "doctor", None, **{k.lower(): v for k, v in n.items()})
+    sys.exit(1 if n["FAIL"] else 0)
+
+
+if __name__ == "__main__":
+    main()

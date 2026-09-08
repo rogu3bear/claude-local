@@ -5,6 +5,9 @@
 #   ~/.claude-local/<file>         -> config/<file>   (adapters, picker, proxy, web search MCP, statusline, prompts, settings)
 #   ~/.local/bin/llama-server-run  -> bin/llama-server-run  (ExecStart of llama-server.service)
 #   ~/.local/bin/llama-models-ini  -> bin/llama-models-ini  (append new GGUFs to the router INI)
+#   ~/.local/bin/claude-local-doctor -> bin/claude-local-doctor (read-only diagnosis of the stack)
+#   ~/.local/bin/claude-local-drain  -> bin/claude-local-drain  (unload models no session uses)
+#   ~/.config/systemd/user/claude-local-drain.{service,timer}     (copied if changed; timer enabled)
 #   ~/.claude-local/bench          -> bench/
 #   ~/.claude-local/skills         -> skills/   (Claude Code reads them only when Skill is in CLAUDE_LOCAL_TOOLS)
 #   ~/.config/systemd/user/ollama.service.d/10-claude-local.conf   (copied if changed)
@@ -27,7 +30,9 @@ mkdir -p "$BIN" "$CONFIG"
 link "$HERE/bin/claude-local" "$BIN/claude-local"
 link "$HERE/bin/llama-server-run" "$BIN/llama-server-run"
 link "$HERE/bin/llama-models-ini" "$BIN/llama-models-ini"
-for f in backend-ollama.sh backend-llamaserver.sh picker.py proxy.py mcp-websearch.py hook-urlguard.py statusline.sh system_prompt.md system_prompt_compact.md settings.json; do
+link "$HERE/bin/claude-local-doctor" "$BIN/claude-local-doctor"
+link "$HERE/bin/claude-local-drain" "$BIN/claude-local-drain"
+for f in backend-ollama.sh backend-llamaserver.sh picker.py proxy.py clog.py mcp-websearch.py hook-urlguard.py hook-audit.py statusline.sh system_prompt.md system_prompt_compact.md settings.json; do
   link "$HERE/config/$f" "$CONFIG/$f"
 done
 link "$HERE/bench" "$CONFIG/bench"
@@ -65,8 +70,17 @@ if systemctl --user cat llama-server.service >/dev/null 2>&1; then
     cp "$HERE/systemd/llama-server/10-claude-local.conf" "$D/"; systemctl --user daemon-reload; echo "installed $D/10-claude-local.conf" >&2; echo "LLAMA_DROPIN_CHANGED"
   fi
 fi
+# Drain timer: unload models no session uses (bin/claude-local-drain), every 2 minutes.
+U="$HOME/.config/systemd/user"; mkdir -p "$U"; dchanged=0
+for f in claude-local-drain.service claude-local-drain.timer; do
+  if ! cmp -s "$HERE/systemd/drain/$f" "$U/$f"; then cp "$HERE/systemd/drain/$f" "$U/$f"; dchanged=1; echo "installed $U/$f" >&2; fi
+done
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  [ "$dchanged" = 1 ] && systemctl --user daemon-reload
+  systemctl --user is-active --quiet claude-local-drain.timer || { systemctl --user enable --now claude-local-drain.timer 2>/dev/null && echo "enabled claude-local-drain.timer (models unload when no session uses them)" >&2; }
+fi
 if [ "$CONFIG" != "$HOME/.claude-local" ]; then
-  echo "note: set statusLine.command in $CONFIG/settings.json to $CONFIG/statusline.sh and the hooks.PreToolUse command to $CONFIG/hook-urlguard.py" >&2
+  echo "note: set statusLine.command in $CONFIG/settings.json to $CONFIG/statusline.sh and the hook commands to $CONFIG/hook-urlguard.py / $CONFIG/hook-audit.py" >&2
 fi
 [ "$changed" = 1 ] && echo "DROPIN_CHANGED"
 echo "done. try: claude-local" >&2

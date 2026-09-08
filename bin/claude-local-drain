@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""claude-local-drain: unload models that no session is using, so a fleet of local models
+does not stay resident after the sessions that loaded them are gone.
+
+The usage proxy dehydrates idle presets only while a session is alive. This command covers the
+rest: run by the user timer claude-local-drain.timer every 2 minutes (install.sh enables it), or
+by hand. Rules, per resident model:
+
+  * a model that a live claude-local session was started on is never touched (run/<pid>/session_model)
+  * a model with a request in flight is never touched (GET /slots?model= is_processing)
+  * with no live session at all, a model idle for CLAUDE_LOCAL_DRAIN_GRACE seconds (default 300) is
+    checkpointed (slot save, so it comes back warm) and unloaded
+  * with sessions live, a model none of them uses is unloaded after CLAUDE_LOCAL_IDLE_UNLOAD seconds
+    (default 1200), the same rule the proxies apply; this is the safety net
+  * Ollama models get keep_alive 0 under the same rules (no checkpoint: Ollama has none)
+  "Idle" is measured from the shared ledger run/last_use.json (every turn and load writes it); a
+  model with no ledger entry is aged from when this command first saw it (run/drain_seen.json).
+
+    claude-local-drain                # apply; prints what it did
+    claude-local-drain --status       # table of resident models with verdicts, changes nothing
+    claude-local-drain --status --json
+    claude-local-drain --dry-run      # verdicts as they would be applied
+    claude-local-drain --grace 60     # override the no-session grace for this run
+Events (config/clog.py, src=drain): drain_unload, drain_failed, drain_skipped_processing.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+CONFIG = os.environ.get("CLAUDE_LOCAL_CONFIG") or os.path.expanduser("~/.claude-local")
+sys.path.insert(0, CONFIG)
+try:
+    import clog
+except ImportError:
+    clog = None
+RUN = os.path.join(CONFIG, "run")
+SEEN = os.path.join(RUN, "drain_seen.json")
+ARGS = sys.argv[1:]
+STATUS = "--status" in ARGS
+DRY = "--dry-run" in ARGS or STATUS
+JSON = "--json" in ARGS
+
+
+def envf():
+    out = subprocess.run(["bash", "-c", f'. "{CONFIG}/env" 2>/dev/null; echo "$CLAUDE_LOCAL_OLLAMA_PORT|$CLAUDE_LOCAL_LLAMASERVER_PORT|$CLAUDE_LOCAL_IDLE_UNLOAD|$CLAUDE_LOCAL_DRAIN_GRACE"'],
+                         capture_output=True, text=True).stdout.strip().split("|")
+    out += [""] * (4 - len(out))
+    op = os.environ.get("CLAUDE_LOCAL_OLLAMA_PORT") or out[0] or "1234"
+    lp = os.environ.get("CLAUDE_LOCAL_LLAMASERVER_PORT") or out[1] or "1244"
+    idle = float(os.environ.get("CLAUDE_LOCAL_IDLE_UNLOAD") or out[2] or 1200)
+    grace = float(os.environ.get("CLAUDE_LOCAL_DRAIN_GRACE") or out[3] or 300)
+    if "--grace" in ARGS:
+        grace = float(ARGS[ARGS.index("--grace") + 1])
+    return op, lp, idle, grace
+
+
+def http(method, url, body=None, timeout=5):
+    req = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"content-type": "application/json"} if body is not None else {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
+            try:
+                return r.status, json.loads(data or b"{}")
+            except ValueError:
+                return r.status, {}
+    except Exception as e:  # noqa: BLE001
+        return None, {"error": str(e)}
+
+
+def event(kind, level="info", **f):
+    if clog:
+        try:
+            clog.event(kind, level, "drain", None, **f)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def live_sessions():
+    out = {}
+    for d in os.listdir(RUN) if os.path.isdir(RUN) else []:
+        if not d.isdigit():
+            continue
+        try:
+            os.kill(int(d), 0)
+        except OSError:
+            continue
+        try:
+            out[d] = open(os.path.join(RUN, d, "session_model")).read().strip()
+        except OSError:
+            out[d] = "?"
+    return out
+
+
+def load_json(p):
+    try:
+        return json.load(open(p))
+    except (OSError, ValueError):
+        return {}
+
+
+def slug(m):
+    return "claude-local-" + re.sub(r"[^A-Za-z0-9._-]", "_", m) + ".bin"
+
+
+def main():
+    op, lp, idle_s, grace_s = envf()
+    now = time.time()
+    live = live_sessions()
+    ledger = load_json(os.path.join(RUN, "last_use.json"))
+    seen = load_json(SEEN)
+    threshold = grace_s if not live else idle_s
+    rows = []
+
+    def age_of(m):
+        last = ledger.get(m)
+        if last is None:
+            last = seen.setdefault(m, now)
+        return now - last
+
+    # llama-server router
+    st, d = http("GET", f"http://127.0.0.1:{lp}/models")
+    for e in (d.get("data") or []) if st == 200 else []:
+        s = e.get("status") or {}
+        if s.get("value") != "loaded":
+            continue
+        m = e["id"]
+        row = {"backend": "llamaserver", "model": m, "age_s": int(age_of(m)), "used_by": [p for p, mm in live.items() if mm == m]}
+        st2, slots = http("GET", f"http://127.0.0.1:{lp}/slots?model={urllib.parse.quote(m)}")
+        row["processing"] = bool(st2 == 200 and any(x.get("is_processing") for x in (slots if isinstance(slots, list) else [])))
+        rows.append(row)
+    # ollama
+    st, d = http("GET", f"http://127.0.0.1:{op}/api/ps", timeout=2)
+    for e in (d.get("models") or []) if st == 200 else []:
+        m = e["name"]
+        rows.append({"backend": "ollama", "model": m, "age_s": int(age_of(m)), "used_by": [p for p, mm in live.items() if mm == m], "processing": False})
+
+    for r in rows:
+        if r["used_by"]:
+            r["verdict"] = "keep: session " + ",".join(r["used_by"])
+        elif r["processing"]:
+            r["verdict"] = "keep: request in flight"
+        elif r["age_s"] < threshold:
+            r["verdict"] = f"keep: idle {r['age_s']}s < {int(threshold)}s"
+        else:
+            r["verdict"] = "drain"
+    for m in list(seen):                    # forget models that are no longer resident
+        if m not in {r["model"] for r in rows}:
+            seen.pop(m)
+    try:
+        os.makedirs(RUN, exist_ok=True)
+        json.dump(seen, open(SEEN, "w"))
+    except OSError:
+        pass
+
+    if JSON:
+        print(json.dumps({"live_sessions": live, "threshold_s": threshold, "models": rows}))
+    else:
+        print(f"live sessions: {', '.join(f'{p}={m}' for p, m in live.items()) or 'none'}; threshold {int(threshold)}s "
+              f"({'no-session grace' if not live else 'idle-unload'})")
+        for r in rows:
+            print(f"  {r['backend']:11} {r['model']:24} idle {r['age_s']:6}s  {r['verdict']}")
+        if not rows:
+            print("  nothing resident")
+    if DRY:
+        return
+    for r in rows:
+        if r["verdict"] != "drain":
+            continue
+        m = r["model"]
+        if r["backend"] == "llamaserver":
+            st, d = http("POST", f"http://127.0.0.1:{lp}/slots/0?action=save", {"filename": slug(m), "model": m}, timeout=600)
+            saved = d.get("n_saved") if st == 200 else None
+            st, d = http("POST", f"http://127.0.0.1:{lp}/models/unload", {"model": m}, timeout=60)
+        else:
+            saved = None
+            st, d = http("POST", f"http://127.0.0.1:{op}/api/generate", {"model": m, "prompt": "", "stream": False, "options": {"num_predict": 0}, "keep_alive": 0}, timeout=600)
+        if st == 200:
+            print(f"  drained {m} (idle {r['age_s']}s{', checkpoint ' + str(saved) + ' tokens' if saved else ''})")
+            event("drain_unload", "info", backend=r["backend"], model=m, idle_s=r["age_s"], checkpoint_tokens=saved,
+                  live_sessions=len(live))
+        else:
+            print(f"  FAILED to drain {m}: HTTP {st} {json.dumps(d)[:120]}")
+            event("drain_failed", "warn", backend=r["backend"], model=m, status=st, error=json.dumps(d)[:200],
+                  hint="the unload request was refused; is the server healthy? claude-local-doctor")
+
+
+if __name__ == "__main__":
+    import urllib.parse  # noqa: E402
+    main()

@@ -13,6 +13,24 @@ User → claude-local launcher → proxy.py (port PORT+1) → backend server (po
 - The proxy sits on the next free port and logs usage to `~/.claude-local/usage.jsonl`
 - Health checks: Ollama → `/api/tags`, llama-server → `/health` (returns 503 while loading)
 
+## Step 0: Run the doctor and read the event log first
+
+```bash
+claude-local-doctor --since 2h          # read-only; PASS/WARN/FAIL per check with a hint for each finding
+tail -n 30 ~/.claude-local/logs/events.jsonl | jq -c '{ts,level,kind,status,err_class,err_msg,div,hint}'
+tail -n 5 "$CLAUDE_LOCAL_SESSION_DIR/events.jsonl" 2>/dev/null | jq -c '{kind,status,err_class,hint}'
+```
+
+The event log names the failure class of every failed turn (`turn_failed` with `err_class` template /
+model_not_found / model_load / context / oom / busy / server) and carries a `hint` with the fix. A
+`retry_storm` event is what "waiting for API" looks like from the inside. `cache_miss` events say where
+the request diverged from the previous one (`div`: system[i], tools, messages[i], or extension when the
+server itself lost the slot). Most diagnoses end here.
+
+**Never restart, stop or kill the server or the proxy that is serving the session you are in**: the current
+turn dies with it and the hook `config/hook-audit.py` refuses those commands anyway. Report the finding and
+let the user decide; the launcher's post-exit menu unloads models cleanly.
+
 ## Step 1: Identify the backend
 
 ```bash
@@ -91,24 +109,15 @@ Key diagnostic fields:
 - `ttft_ms`: time-to-first-token. Above 30s suggests cold load or context overflow
 - `input` + `cache_read`: total prompt size. If this exceeds the server context, truncation occurs
 
-## Step 7: Restart (only when safe)
+## Step 7: Restart (only the user, only when no session is live)
 
-**Ollama:**
-```bash
-systemctl --user restart ollama.service
-sleep 3
-curl -sf --max-time 3 http://localhost:$PORT/api/tags && echo "Server is up" || echo "Still starting..."
-```
+A restart kills every session's turn and evicts every model; the proxy checkpoints slots so they come back
+warm, but the running turn is lost. From inside a session the guard refuses these commands. Tell the user:
 
-**llama-server:**
 ```bash
-# Only restart if the server is NOT returning 503 (not loading)
-health_code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:$PORT/health)
-if [ "$health_code" != "503" ]; then
-  systemctl --user restart llama-server.service
-else
-  echo "Server is still loading (503). Do not restart — wait for it."
-fi
+# when no claude-local session is running:
+systemctl --user restart llama-server.service     # or ollama.service
+claude-local-doctor --since 10m                   # confirm /health 200 and no failed presets
 ```
 
 ## Common failure modes
@@ -121,10 +130,11 @@ fi
 | Every Qwen3.8 turn fails with HTTP 500 `System message must be at the beginning` | Claude Code's mid-conversation `role: system` message (Agent tool) hits Qwen3.8's template | Run through the usage proxy (`CLAUDE_LOCAL_PROXY=1`, default), which folds it into the system prompt |
 | Web search returns nothing, or the model says WebSearch is unavailable | The built-in WebSearch is executed by Anthropic's API and cannot work here; the MCP replacement is off or not reachable | The launcher banner must say `websearch=1` (`CLAUDE_LOCAL_OFFLINE=1` forces it off); check `$CLAUDE_LOCAL_SESSION_DIR/mcp.json` exists; test the server by hand with the recipe at the top of `config/mcp-websearch.py` |
 | Very slow (30s+ per turn) | Context overflow, CPU fallback, or low cache hit | Check usage.jsonl for `cache_pct`; verify autocompact matches server context |
-| Port already in use | Stale process from crashed session | `fuser -k PORT/tcp`; check for zombie `ollama` or `llama-server` processes |
+| Port already in use | Stale proxy from a crashed session | `claude-local-doctor` lists orphan proxies with their pids; ask the user to kill them (never a port the live session uses) |
 | GPU resets in dmesg | Linux 7.0 kernel 2s job timeout on long submits | Reboot; this is a known issue under heavy context loads (>60K tokens) |
 | Model won't load after picker says LOAD | Backend adapter failed silently | Check `journalctl --user -u <service>` for the actual error |
-| Cache hit drops to near 0 | System prompt changed between turns (dynamic sections) | Verify `--exclude-dynamic-system-prompt-sections` flag is set in launcher |
+| Cache hit drops to near 0 | Something before the conversation tail changes every turn (Claude Code's `<total_tokens>` reminder did this on 2026-09-08), or a subagent shares the single slot | `cache_miss` events carry `div`; `make check-prefix` reproduces offline; `conv_switch` events show slot sharing |
+| "waiting for API", "API Error" in the session | Claude Code retrying a failing turn (up to 11 attempts) | `events.jsonl`: the `turn_failed` / `upstream_unreachable` / `stream_incomplete` event says why; `retry_storm` marks the loop |
 
 ## llama-server-specific: slot cache
 

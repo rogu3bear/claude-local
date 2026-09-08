@@ -11,7 +11,10 @@ backed by a benchmark number.
                             # The port is persisted in ~/.claude-local/env; `ollama` on PATH is a wrapper that targets it.
     make install            # symlinks only (already-bootstrapped machine)
     claude-local            # pick a model, go
-    make check              # lint + one smoke turn through launcher and proxy
+    make test               # offline tests: proxy error events, hook guards (no server needed)
+    make doctor             # read-only diagnosis of install, server, GPU, sessions, drain, error logs
+    make drain-status       # what is resident, who uses it, what the drain timer will unload
+    make check              # offline tests + one smoke turn through launcher and proxy
     make check-interactive  # pty-driven full session (picker, statusline, Ctrl-C, exit menu)
     make check-checkpoint   # kill an idle llama-server model instance, expect the proxy to resume it warm
     make check-idle         # load a throwaway preset, expect the proxy to checkpoint and unload it when idle
@@ -87,6 +90,101 @@ registers `config/mcp-websearch.py` via `--mcp-config` instead: a dependency-fre
 queries DuckDuckGo's HTML endpoint and shows up to the model as `mcp__websearch__web_search` (`--tools`
 only limits the built-in set; MCP tools ride along). `WebFetch` is client-side and works as is.
 `CLAUDE_LOCAL_WEBSEARCH=0` disables the server; `CLAUDE_LOCAL_OFFLINE=1` implies it.
+
+### Errors and diagnostics
+
+Every failure the stack can see is one JSON line in two places: the session's `run/<pid>/events.jsonl`
+and `~/.claude-local/logs/events.jsonl` (rotated at 20 MB; the session dir is reaped by the next launcher,
+the global log is not). `config/clog.py` writes them; the proxy, the launcher, the hooks and the doctor
+all use it. At exit the launcher archives the session's small files (usage rows, events, tool audit, proxy
+log, Claude Code's own debug log) to `logs/sessions/<start>-<pid>/`, keeping the last 40.
+
+    claude-local-doctor            # read-only diagnosis, safe next to a live session (make doctor)
+    claude-local-doctor --since 2h --quiet
+    make test                      # offline: proxy error/anomaly events, hook guards, no model server (~10s)
+    make check-prefix              # offline: real `claude -p` through proxy+stub, every follow-up request must extend the previous one
+    tail -f ~/.claude-local/logs/events.jsonl | jq -c '{level,kind,hint}'
+
+What the proxy records (`config/proxy.py`), each with a `hint` saying what to do:
+
+| kind | level | when |
+|---|---|---|
+| `turn_failed` | error | any non-200 Messages response: `status`, `err_class` (template, model_not_found, model_load, context, oom, busy, server, request), the server's `err_msg`, request shape |
+| `upstream_unreachable` | error | the backend did not answer (502 to Claude Code), with `server_up` from a health probe |
+| `stream_incomplete` | error | 200 but the stream ended without its final `message_delta`: the instance died mid-generation |
+| `retry_storm` | error | three failed turns inside 60 s, which is what "waiting for API" is on the screen |
+| `client_abort` | warn | Claude Code hung up mid-response (Esc, Ctrl-C, its own timeout) |
+| `cache_miss` | warn | prompt >= 4K and cache hit < 50%; `div` says where the request diverged from the previous one of the same conversation: `extension` (server-side loss), `system[i]`, `tools`, `messages[i]` |
+| `conv_switch` | info | a different conversation (subagent, side request) took the single slot |
+| `output_truncated`, `empty_output`, `slow_prefill`, `slow_decode` | warn | stop_reason max_tokens; no tokens; ttft > 30 s; < 8 tok/s |
+| `model_resume`, `model_restarted`, `restored`, `checkpoint*`, `idle_unload` | info/warn | the checkpoint layer's decisions |
+| `volatile_system_stripped` | info | see below |
+
+`CLAUDE_LOCAL_PROXY_DEBUG=2` also dumps every request body to `run/<pid>/requests/` for a post-mortem.
+Every usage row now carries `conv` (conversation id) and `div`, so `usage.jsonl` alone shows a subagent
+interleaving with its parent or a prefix that changed.
+
+**The 0% cache of 2026-09-08, and its fix.** Claude Code (2.1.265) appends a `role: system` message
+`<total_tokens>N tokens left</total_tokens>` to every request after the first, with a new number each turn and
+the old ones kept. The proxy's fold moved it into the system prompt, so on a hybrid model every turn
+re-prefilled the tool schemas and the whole conversation (12K-30K tokens, 15-40 s; the server log shows
+`selected slot by LCP similarity, f_sim_best = 0.45`). The proxy now drops that block wherever it appears
+(`strip_volatile`), the launcher sets `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off` so it is not sent at all, and
+`make check-prefix` fails if any follow-up request is not a pure extension of the previous one. The moving
+`cache_control` breakpoint that Claude Code also sends is not rendered by the server and is ignored.
+
+Claude Code's own view goes to `run/<pid>/claude-debug.log` (`--debug-file`, `CLAUDE_LOCAL_CLAUDE_DEBUG=0`
+turns it off): every API attempt (`API error (attempt 3/11)`), MCP and hook traffic. The debug file changes
+nothing on screen. The doctor also reads the `API Error:` lines Claude Code wrote into its transcripts.
+
+**Tool audit and guard rails** (`config/hook-audit.py`, wired for every tool in `config/settings.json`).
+Every tool call is a line in `run/<pid>/tools.jsonl` (pre, post, failure, duration, first error line), and
+failures are `tool_failed` events. Before a call runs, the guard refuses, with a reason the model can act on:
+Bash commands that would destroy the tree or the machine (`rm -rf` on /, ~, ., .git; `mkfs`, `dd` to a disk;
+force push; `reset --hard`, `clean -f`; `kill -9 -1`; reboot; `curl | sh`) and, most relevant here, anything
+that stops or restarts the server or proxy serving the current session (`systemctl restart llama-server`,
+`fuser -k 1244/tcp`, `pkill llama-server`, `kill <proxy pid>`), which the old diagnose skill used to suggest;
+Write/Edit to a flattened path (`-home-user-...`, seen from small models), an invented `/tmp/claude-*`
+directory, the real `~/.claude`, or a system directory. Refusals are `tool_denied` events and show on the
+statusline. `CLAUDE_LOCAL_BASHGUARD=0`, `CLAUDE_LOCAL_PATHGUARD=0`, `CLAUDE_LOCAL_AUDIT=0` switch the parts off.
+
+The statusline's second line shows the session's last error or warning for ten minutes
+(`!! turn_failed 500 template (1 err)`), so a retry loop is visible without opening any log.
+
+**What the doctor checks:** symlinks and hook paths resolve, settings.json parses, every script parses,
+`claude` present; the env file and adapter; unit state and restart count, the server's own error lines in
+the window, `/health`, router presets and their `failed` flag, the INI against the GGUF files (missing,
+truncated, bad magic, colons, duplicates) and against what the server has loaded (INI edited but not
+reloaded), the drop-in against the running unit's environment (changed but not restarted), context vs
+autocompact, orphan slot files; memory, swap, GPU memory, kernel GPU resets and OOM kills, disk; live
+launchers, stale session dirs, orphan proxies, ports, the idle-unload ledger; the event log by kind with
+the last occurrence's hint, tool denials and failures, Claude Code's API-error lines, and the median cache
+hit of live sessions. It never restarts, kills or edits anything.
+
+**Draining: models leave memory when nobody uses them.** The proxy's idle-unload runs only inside a live
+session, and only between that session's turns; with the last session gone, or a busy session that is
+always mid-turn, nothing unloaded anything (2026-09-08: a preset sat resident for 54 minutes next to a
+live session on another preset). `claude-local-drain`, run every two minutes by the user timer
+`claude-local-drain.timer` (installed and enabled by `make install`), applies the rules from outside:
+
+- a model a live session was started on is never touched; a model with a request in flight is never touched
+- no live session at all: every resident model idle for `CLAUDE_LOCAL_DRAIN_GRACE` seconds (default 300) is
+  checkpointed and unloaded
+- sessions live: a model none of them uses goes after `CLAUDE_LOCAL_IDLE_UNLOAD` seconds (default 1200)
+- Ollama models get `keep_alive 0` under the same rules
+
+Idle time comes from the shared ledger `run/last_use.json`. `make drain-status` (or `claude-local-drain
+--status`) prints what is resident, who uses it, and the verdict; `journalctl --user -u
+claude-local-drain.service` shows every unload; the doctor checks the timer is active, nothing is overdue,
+and counts `drain_unload` / `drain_failed` events. A drained preset comes back warm through the slot file.
+
+**Subagents on one slot.** `LLAMA_ARG_N_PARALLEL=1` means a parent and its subagents take turns in the same
+slot. Hybrid models cannot rewind, so each hand-over re-prefills the resumed side (a 20K-token parent is
+~25 s at 800 tok/s here); parallel subagents are serialised on the slot. The proxy marks every hand-over as
+`conv_switch`, so `usage.jsonl` shows what a session with Agents costs. Use Agent for work whose result is
+small and whose reading is large; run subagents sequentially rather than in parallel; or raise
+`LLAMA_ARG_N_PARALLEL` in the drop-in at the cost of splitting the 128K context between slots (and lowering
+autocompact to match).
 
 ### Checkpoints and resume (llama-server)
 

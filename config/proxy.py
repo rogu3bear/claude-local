@@ -10,12 +10,26 @@ for non-streaming calls) and appended as one JSON line to USAGE_LOG:
   {"ts":..., "model":..., "ms":..., "ttft_ms":..., "input":<uncached prompt tokens>,
    "cache_read":<cached prompt tokens>, "prompt":<input+cache_read>, "output":...,
    "out_tps":<output tokens / generation seconds>, "cache_pct":..., "msgs":<#messages in request>,
-   "stop":<stop_reason>}
+   "stop":<stop_reason>, "conv":<conversation id>, "div":<where the prefix diverged from the
+   previous request of this conversation: first_turn | extension | system[i] | tools | messages[i]>}
 
 Env: PROXY_PORT (first port to try, default 1235; PROXY_PORT_FILE receives the bound port), UPSTREAM_HOST/UPSTREAM_PORT (127.0.0.1/1234),
      USAGE_LOG (default ~/.claude-local/usage.jsonl),
      PROXY_DEBUG=1 adds the request's sampling params / tool count / system size to each row,
+     PROXY_DEBUG=2 (or PROXY_DUMP=1) also writes every Messages request body to <session>/requests/,
      PROXY_SAMPLING='{...}' overrides temperature/top_p/top_k on every Messages request
+
+Errors and anomalies (clog.py, events.jsonl in the session dir and in ~/.claude-local/logs):
+  * every non-200 turn: turn_failed {status, err_class, err_msg, model, msgs, tools, prompt_est}
+  * upstream_unreachable (502 returned to Claude Code), client_abort (Claude Code hung up
+    mid-stream: Esc, timeout), stream_incomplete (200 but no final message_delta: the
+    instance died mid-generation), proxy_exception
+  * on successful turns: cache_miss (prompt >= PROXY_WARN_PROMPT and cache_pct < PROXY_WARN_CACHE_PCT,
+    with `div` saying which part of the request changed since the previous turn of the same
+    conversation), conv_switch (a different conversation used the slot: subagent or side
+    request), output_truncated (stop_reason max_tokens), slow_prefill (ttft > PROXY_WARN_TTFT_S),
+    slow_decode (out_tps < PROXY_WARN_TPS with >= 50 output tokens), empty_output
+  * retry_storm: >= 3 failed turns inside 60 s (Claude Code is in its retry loop)
 
 One request rewrite is always on: any `role: system` entry inside `messages` is
 moved into the top-level `system` blocks (see fold_system_messages).
@@ -43,6 +57,7 @@ Checkpoint and resume (llama-server router mode, PROXY_BACKEND=llamaserver):
        SLOTS_DIR (where the server writes slot files).
 """
 import fcntl
+import hashlib
 import http.client
 import json
 import os
@@ -51,7 +66,11 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import clog  # noqa: E402  (installed next to this file)
 
 LISTEN_PORT = int(os.environ.get("PROXY_PORT", "1235"))
 UP_HOST = os.environ.get("UPSTREAM_HOST", "127.0.0.1")
@@ -75,10 +94,26 @@ IDLE_UNLOAD_S = float(os.environ.get("PROXY_IDLE_UNLOAD_S") or 0)
 STATE_DIR = os.environ.get("PROXY_STATE_DIR") or os.path.dirname(os.path.abspath(USAGE_LOG))
 SLOTS_DIR = os.environ.get("SLOTS_DIR") or os.path.expanduser("~/.claude-local/slots")
 LOAD_WAIT_S = 900
+DEBUG = os.environ.get("PROXY_DEBUG") or ""
+DUMP = DEBUG == "2" or os.environ.get("PROXY_DUMP") == "1"
+DUMP_DIR = os.path.join(os.path.dirname(os.path.abspath(USAGE_LOG)), "requests")
+DUMP_MAX = 300
+# anomaly thresholds
+WARN_PROMPT = int(os.environ.get("PROXY_WARN_PROMPT") or 4000)      # below this a cold prompt is cheap anyway
+WARN_CACHE_PCT = int(os.environ.get("PROXY_WARN_CACHE_PCT") or 50)
+WARN_TTFT_S = float(os.environ.get("PROXY_WARN_TTFT_S") or 30)
+WARN_TPS = float(os.environ.get("PROXY_WARN_TPS") or 8)
 
 
 def log(msg):
     print(f"[proxy] {msg}", file=sys.stderr, flush=True)
+
+
+def event(kind, level="info", hint=None, **fields):
+    row = clog.event(kind, level, "proxy", hint, **fields)
+    if level != "info":
+        log(f"{level} {kind}: " + " ".join(f"{k}={v}" for k, v in fields.items() if k not in ("hint",)))
+    return row
 
 
 # ------------------------------------------------------------ checkpoint / resume ----
@@ -108,7 +143,8 @@ def ledger_update(model, ts):
                 json.dump(d, f)
             os.replace(tmp, LEDGER)
     except OSError as e:
-        log(f"ledger update failed: {e}")
+        event("ledger_failed", "warn", error=str(e), path=LEDGER,
+              hint="idle-unload ledger not writable; other sessions may evict this model")
 
 
 def ledger_read():
@@ -141,6 +177,15 @@ def upstream_json(method, path, body=None, timeout=30):
             return r.status, {}
     finally:
         conn.close()
+
+
+def server_up():
+    """Cheap reachability probe for error events (never raises)."""
+    try:
+        st, _ = upstream_json("GET", "/health" if BACKEND == "llamaserver" else "/api/tags", timeout=2)
+        return st < 500
+    except OSError:
+        return False
 
 
 def model_state(model):
@@ -184,28 +229,35 @@ def checkpoint(model, why):
         if st == 200:
             log(f"checkpoint {model} ({why}): {d.get('n_saved', '?')} tokens, "
                 f"{int((d.get('n_written') or 0) / 1e6)} MB, {int((time.time() - t0) * 1000)} ms")
+            event("checkpoint", model=model, why=why, tokens=d.get("n_saved"),
+                  mb=int((d.get("n_written") or 0) / 1e6), ms=int((time.time() - t0) * 1000))
         else:
-            log(f"checkpoint {model} failed: HTTP {st} {json.dumps(d)[:160]}")
+            event("checkpoint_failed", "warn", model=model, why=why, status=st, error=json.dumps(d)[:160],
+                  hint="slot save refused; the next resume will be cold. Is --slot-save-path writable and the model loaded?")
     except OSError as e:
-        log(f"checkpoint {model} failed: {e}")
+        event("checkpoint_failed", "warn", model=model, why=why, error=str(e),
+              hint="server unreachable during slot save")
 
 
 def restore(model):
     f = slot_file(model)
     path = os.path.join(SLOTS_DIR, f)
     if not os.path.exists(path):
-        log(f"no checkpoint on disk for {model}; first turn will be cold")
+        event("restore_skipped", model=model, hint="no checkpoint on disk; first turn will be cold")
         return
     try:
         st, d = upstream_json("POST", "/slots/0?action=restore", {"filename": f, "model": model}, timeout=300)
     except OSError as e:
-        log(f"restore {model} failed: {e}")
+        event("restore_failed", "warn", model=model, error=str(e))
         return
     if st == 200:
         log(f"restored {model}: {d.get('n_restored', '?')} tokens, "
             f"{int((d.get('timings') or {}).get('restore_ms') or 0)} ms")
+        event("restored", model=model, tokens=d.get("n_restored"),
+              ms=int((d.get("timings") or {}).get("restore_ms") or 0))
     else:
-        log(f"restore {model} failed: HTTP {st}; removing stale checkpoint {f}")
+        event("restore_failed", "warn", model=model, status=st, file=f,
+              hint="stale checkpoint removed (model or context changed since it was saved); next turn is cold")
         try:
             os.remove(path)
         except OSError:
@@ -223,12 +275,15 @@ def ensure_warm(model):
             if v is None:
                 return
             if v in ("unloaded", "failed"):
-                log(f"{model} is {v}; loading it")
+                event("model_resume", "warn", model=model, state=v,
+                      hint="the preset was not resident before this turn (crash, unload, eviction); reloading it")
+                t0 = time.time()
                 upstream_json("POST", "/models/load", {"model": model}, timeout=30)
                 v, port = wait_loaded(model)
                 if v != "loaded":
-                    log(f"{model} did not load ({v}); forwarding anyway")
+                    event("model_load_failed", "error", model=model, state=v, hint=clog.HINTS["model_load"])
                     return
+                event("model_loaded", model=model, s=int(time.time() - t0))
                 restore(model)
                 _instance[model] = port
                 return
@@ -238,11 +293,12 @@ def ensure_warm(model):
                     return
             prev = _instance.get(model)
             if prev is not None and prev != port:
-                log(f"{model} restarted (port {prev} -> {port}); restoring checkpoint")
+                event("model_restarted", "warn", model=model, old_port=prev, new_port=port,
+                      hint="the model instance restarted under us (unit restart or crash); restoring its checkpoint")
                 restore(model)
             _instance[model] = port
         except Exception as e:  # noqa: BLE001 -- the turn must go through regardless
-            log(f"ensure_warm {model}: {e}")
+            event("proxy_exception", "error", where="ensure_warm", model=model, error=str(e))
 
 
 def loaded_presets():
@@ -269,13 +325,14 @@ def idle_unload_pass():
             if _inflight:
                 return
             _dirty.pop(m, None)
-        log(f"{m} unused for {int((now - last) / 60)} min; dehydrating")
+        event("idle_unload", model=m, idle_min=int((now - last) / 60))
         checkpoint(m, "idle-unload")
         try:
             st, _ = upstream_json("POST", "/models/unload", {"model": m}, timeout=60)
-            log(f"unloaded {m}" if st == 200 else f"unload {m}: HTTP {st}")
+            if st != 200:
+                event("unload_failed", "warn", model=m, status=st)
         except OSError as e:
-            log(f"unload {m} failed: {e}")
+            event("unload_failed", "warn", model=m, error=str(e))
         _instance.pop(m, None)
         _first_seen.pop(m, None)
 
@@ -299,7 +356,7 @@ def keeper():
             try:
                 idle_unload_pass()
             except Exception as e:  # noqa: BLE001
-                log(f"idle unload pass: {e}")
+                event("proxy_exception", "error", where="idle_unload_pass", error=str(e))
 
 
 def flush_and_exit(*_):
@@ -322,18 +379,30 @@ def fold_system_messages(req: dict) -> bool:
     equivalent for the model and keeps it in the cached prefix. Returns True if changed.
     """
     msgs = req.get("messages")
-    if not isinstance(msgs, list) or not any(isinstance(m, dict) and m.get("role") == "system" for m in msgs):
+    if not isinstance(msgs, list):
         return False
+    changed = False
+    for m in msgs:                      # a volatile counter as a text block of a user message
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list) and any(isinstance(b, dict) and b.get("type") == "text" and VOLATILE_ONLY_RE.match(b.get("text") or "") for b in c):
+            kept_blocks = [b for b in c if not (isinstance(b, dict) and b.get("type") == "text" and VOLATILE_ONLY_RE.match(b.get("text") or ""))]
+            if kept_blocks:
+                m["content"] = kept_blocks
+                changed = True
+                strip_volatile("<total_tokens>")   # counts and logs once
+    if not any(isinstance(m, dict) and m.get("role") == "system" for m in msgs):
+        return changed
     system = req.get("system")
     blocks = [{"type": "text", "text": system}] if isinstance(system, str) else list(system or [])
     kept = []
     for m in msgs:
         if isinstance(m, dict) and m.get("role") == "system":
             c = m.get("content")
-            if isinstance(c, str):
-                blocks.append({"type": "text", "text": c})
-            elif isinstance(c, list):
-                blocks.extend(b for b in c if isinstance(b, dict) and b.get("type") == "text")
+            texts = [c] if isinstance(c, str) else [b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"] if isinstance(c, list) else []
+            for t in texts:
+                t = strip_volatile(t)
+                if t.strip():
+                    blocks.append({"type": "text", "text": t})
         else:
             kept.append(m)
     req["messages"] = kept
@@ -341,14 +410,205 @@ def fold_system_messages(req: dict) -> bool:
     return True
 
 
+VOLATILE_RE = re.compile(r"\s*<total_tokens>[^<]*</total_tokens>\s*")
+VOLATILE_ONLY_RE = re.compile(r"^(\s*<total_tokens>[^<]*</total_tokens>\s*)+$")
+_volatile_seen = 0
+
+
+def strip_volatile(text):
+    """Remove per-turn counters Claude Code injects as system text. The only one seen so far is
+    `<total_tokens>N tokens left</total_tokens>` (a role:system message appended after every user
+    turn, with a fresh number each time; CLAUDE_CODE_TOTAL_TOKENS_REMINDER=0 turns it off at the
+    source and the launcher does that too). Folded into the system prompt it would change the
+    cached prefix every turn; a small local model gains nothing from a 15M-token budget notice."""
+    global _volatile_seen
+    if "<total_tokens>" not in text:
+        return text
+    out = VOLATILE_RE.sub("\n", text)
+    _volatile_seen += 1
+    if _volatile_seen == 1:
+        event("volatile_system_stripped", "info", tag="total_tokens",
+              hint="Claude Code sent its per-turn <total_tokens> reminder; stripped so the prefix cache survives. "
+                   "Set CLAUDE_CODE_TOTAL_TOKENS_REMINDER=0 (the launcher does) to stop it at the source.")
+    return out
+
+
+# ------------------------------------------------------------ request fingerprints ----
+# Why a turn missed the prefix cache is only knowable by comparing the request with the
+# previous one of the same conversation: which part changed first (system blocks, tool
+# schemas, or message i). Each component is hashed; the fingerprints of the last request per
+# conversation are kept in memory. A conversation is identified by its first user message
+# (subagents and Claude Code's side calls have their own), so parent/child interleaving on
+# the single slot shows up as conv_switch, not as a rewritten history.
+_fp_lock = threading.Lock()
+_prev_fp = {}        # conv id -> fingerprint dict
+_last_conv = None
+_fail_times = []     # recent failed-turn timestamps (retry storm detection)
+_dump_n = 0
+
+
+def _scrub(obj):
+    """Drop keys the server never renders (cache_control breakpoints move every turn)."""
+    if isinstance(obj, dict):
+        return {k: _scrub(v) for k, v in obj.items() if k != "cache_control"}
+    if isinstance(obj, list):
+        return [_scrub(x) for x in obj]
+    return obj
+
+
+def _h(obj):
+    return hashlib.sha1(json.dumps(_scrub(obj), sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
+
+
+def _block_text(c):
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+    return json.dumps(c, sort_keys=True)
+
+
+def fingerprint(req):
+    system = req.get("system")
+    blocks = [system] if isinstance(system, str) else list(system or [])
+    tools = req.get("tools") or []
+    msgs = req.get("messages") or []
+    first_user = next((m for m in msgs if isinstance(m, dict) and m.get("role") == "user"), None)
+    # a conversation is its first user message minus injected system-reminder blocks
+    root_text = re.sub(r"<system-reminder>.*?</system-reminder>", "", _block_text((first_user or {}).get("content")), flags=re.S)
+    return {
+        "conv": hashlib.sha1((str(req.get("model")) + "\x00" + root_text.strip()).encode()).hexdigest()[:8],
+        "system": [_h(b) for b in blocks],
+        "system_chars": sum(len(_block_text(b if isinstance(b, str) else b.get("text", json.dumps(b)))) for b in blocks),
+        "tools": [(t.get("name", "?"), _h(t)) for t in tools if isinstance(t, dict)],
+        "messages": [_h(m) for m in msgs],
+        "roles": [(m.get("role"), (m.get("content")[0].get("type") if isinstance(m.get("content"), list) and m.get("content") and isinstance(m["content"][0], dict) else "text"))
+                  for m in msgs if isinstance(m, dict)],
+        "msgs": len(msgs),
+        "ntools": len(tools),
+        "est_tokens": len(json.dumps(req)) // 4,
+    }
+
+
+def diverge(prev, cur):
+    """(where, detail): first component of `cur` that differs from `prev`."""
+    if prev is None:
+        return "first_turn", ""
+    if prev["system"] != cur["system"]:
+        i = next((k for k, (a, b) in enumerate(zip(prev["system"], cur["system"])) if a != b), min(len(prev["system"]), len(cur["system"])))
+        return f"system[{i}]", f"{len(prev['system'])} -> {len(cur['system'])} blocks, {prev['system_chars']} -> {cur['system_chars']} chars"
+    if prev["tools"] != cur["tools"]:
+        pn = {n for n, _ in prev["tools"]}; cn = {n for n, _ in cur["tools"]}
+        changed = sorted(n for n, h in cur["tools"] if (n, h) not in set(prev["tools"]) and n in pn)
+        return "tools", f"added={sorted(cn - pn)} removed={sorted(pn - cn)} changed={changed}"
+    pm, cm = prev["messages"], cur["messages"]
+    common = 0
+    for a, b in zip(pm, cm):
+        if a != b:
+            break
+        common += 1
+    if common == len(pm) and len(cm) >= len(pm):
+        return "extension", f"+{len(cm) - len(pm)} messages"
+    if common == 0:
+        return "messages[0]", "different conversation root"
+    role = cur["roles"][common] if common < len(cur["roles"]) else ("?", "?")
+    if common == len(pm) - 1 and len(cm) > common:
+        return f"messages[{common}]", f"last {role[0]}/{role[1]} message of the previous request was modified (history {len(pm)} -> {len(cm)})"
+    return f"messages[{common}]", f"history rewritten at {role[0]}/{role[1]} ({len(pm)} -> {len(cm)} messages; compaction or edited history)"
+
+
+CACHE_HINTS = {
+    "extension": "the request is a pure extension of the previous one, yet the server reused nothing: the slot "
+                 "was evicted in between (another conversation on the single slot, a restart) or the backend does "
+                 "not report cache reads. Check journalctl for 'selected slot by' and 'prompt cache' lines.",
+    "system": "the system blocks changed between turns, so the cached prefix is invalid from the first system "
+              "block on. A dynamic system section defeats the cache: check --system-prompt-snapshot on and "
+              "--exclude-dynamic-system-prompt-sections, and the folded role:system messages (Agent type list).",
+    "tools": "the tool schemas changed between turns (a tool added, removed or with a dynamic description); "
+             "everything after the system prompt is re-prefilled. Compare tool lists with CLAUDE_LOCAL_PROXY_DEBUG=2.",
+    "messages": "the conversation history itself changed (Claude Code rewrote an earlier message, compacted, or a "
+                "system-reminder was appended to the previous user message), so the prefix cache ends there.",
+    "first_turn": "first request of this conversation: a cold prefill is expected unless a checkpoint was restored.",
+}
+
+
+def analyze_success(fp, row):
+    """Anomaly events for a completed turn; sets row['div'] and row['conv']."""
+    global _last_conv
+    with _fp_lock:
+        prev = _prev_fp.get(fp["conv"])
+        where, detail = diverge(prev, fp)
+        switched = _last_conv is not None and _last_conv != fp["conv"]
+        _prev_fp[fp["conv"]] = fp
+        _last_conv = fp["conv"]
+    row["conv"] = fp["conv"]
+    row["div"] = where
+    if switched:
+        event("conv_switch", "info", conv=fp["conv"], msgs=fp["msgs"], prompt=row["prompt"], model=row["model"],
+              hint="a different conversation (subagent or side request) took the slot; with one slot the two "
+                   "evict each other and the parent re-prefills when it resumes")
+    if row["prompt"] >= WARN_PROMPT and row["cache_pct"] < WARN_CACHE_PCT and where != "first_turn":
+        key = where.split("[")[0]
+        event("cache_miss", "warn", model=row["model"], prompt=row["prompt"], cache_pct=row["cache_pct"],
+              ttft_ms=row["ttft_ms"], div=where, detail=detail, conv=fp["conv"], switched=switched or None,
+              hint=CACHE_HINTS.get(key, ""))
+    if row["stop"] == "max_tokens":
+        event("output_truncated", "warn", model=row["model"], output=row["output"],
+              hint="the reply hit the max_tokens cap (CLAUDE_LOCAL_MAX_OUTPUT); a cut-off Write/Edit fails the turn. "
+                   "Raise it or ask for smaller files.")
+    if row["output"] == 0:
+        event("empty_output", "warn", model=row["model"], stop=row["stop"],
+              hint="the model returned no tokens; Claude Code will show an empty turn or retry")
+    if row["ttft_ms"] >= WARN_TTFT_S * 1000 and where != "first_turn":   # a cold first prefill is expected
+        event("slow_prefill", "warn", model=row["model"], ttft_ms=row["ttft_ms"], prompt=row["prompt"],
+              cache_pct=row["cache_pct"], hint="time to first token above threshold: a cold prefill of a large prompt "
+              "(see cache_miss), a competing request on the GPU, or CPU fallback")
+    if row["output"] >= 50 and 0 < row["out_tps"] < WARN_TPS:
+        event("slow_decode", "warn", model=row["model"], out_tps=row["out_tps"], output=row["output"],
+              hint="decode speed far below the model's norm: another process on the GPU, memory pressure "
+                   "(swap), or the model partly on CPU")
+
+
+def note_failure(status, err_class):
+    now = time.time()
+    with _fp_lock:
+        _fail_times.append(now)
+        while _fail_times and now - _fail_times[0] > 60:
+            _fail_times.pop(0)
+        n = len(_fail_times)
+    if n == 3:
+        event("retry_storm", "error", failures_60s=n, status=status, err_class=err_class,
+              hint="Claude Code is in its retry loop ('waiting for API'): every attempt is failing the same way; "
+                   "fix the cause above rather than waiting it out")
+
+
+def dump_request(body, tag):
+    global _dump_n
+    if not DUMP:
+        return
+    try:
+        os.makedirs(DUMP_DIR, exist_ok=True)
+        with _fp_lock:
+            _dump_n += 1
+            n = _dump_n
+        if n > DUMP_MAX:
+            return
+        with open(os.path.join(DUMP_DIR, f"{n:04d}-{tag}.json"), "wb") as f:
+            f.write(body)
+    except OSError:
+        pass
+
+
 def parse_usage(req_body: bytes, resp_body: bytes):
-    """Return the usage dict from a Messages response (streaming or not)."""
-    usage, stop, model = {}, None, None
+    """Return (usage, stop_reason, model, complete) from a Messages response (streaming or not).
+    `complete` is False for a stream that never delivered its final message_delta."""
+    usage, stop, model, complete = {}, None, None, False
     text = resp_body.decode("utf-8", "replace")
     if text.lstrip().startswith("{"):                      # non-streaming
         obj = json.loads(text)
         usage = obj.get("usage") or {}
         stop = obj.get("stop_reason"); model = obj.get("model")
+        complete = True
     else:                                                  # SSE stream
         for line in text.splitlines():
             if not line.startswith("data:"):
@@ -365,13 +625,15 @@ def parse_usage(req_body: bytes, resp_body: bytes):
             elif t == "message_delta":
                 usage.update(ev.get("usage") or {})       # final, authoritative
                 stop = (ev.get("delta") or {}).get("stop_reason") or stop
-    return usage, stop, model
+                complete = True
+            elif t == "error":
+                return usage, "error", model, False
+    return usage, stop, model, complete
 
 
-def record(req_body: bytes, resp_body: bytes, total_s: float, ttft_s):
+def record(req, req_body: bytes, resp_body: bytes, total_s: float, ttft_s, fp):
     try:
-        req = json.loads(req_body or b"{}")
-        usage, stop, model = parse_usage(req_body, resp_body)
+        usage, stop, model, complete = parse_usage(req_body, resp_body)
         inp = int(usage.get("input_tokens") or 0)
         cr = int(usage.get("cache_read_input_tokens") or 0)
         cc = int(usage.get("cache_creation_input_tokens") or 0)
@@ -389,15 +651,23 @@ def record(req_body: bytes, resp_body: bytes, total_s: float, ttft_s):
             "msgs": len(req.get("messages") or []),
             "stop": stop,
         }
-        if os.environ.get("PROXY_DEBUG"):      # request shape minus the messages
+        if DEBUG:      # request shape minus the messages
             row["req"] = {k: v for k, v in req.items() if k not in ("messages", "system", "tools")}
-            row["tools"] = len(req.get("tools") or [])
-            sysb = req.get("system")
-            row["system_chars"] = len(json.dumps(sysb)) if sysb is not None else 0
+            row["tools"] = fp["ntools"]
+            row["system_chars"] = fp["system_chars"]
+        if not complete:
+            event("stream_incomplete", "error", model=row["model"], ms=row["ms"], bytes=len(resp_body),
+                  msgs=row["msgs"], prompt_est=fp["est_tokens"],
+                  hint="the response stream ended without a final message_delta: the model instance died "
+                       "mid-generation (OOM, GPU reset, kill) or the server closed the connection. Claude Code "
+                       "shows this as an API error; journalctl --user -u llama-server.service -e, dmesg for amdgpu.")
+            note_failure(200, "stream_incomplete")
+        else:
+            analyze_success(fp, row)
         with open(USAGE_LOG, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception as e:  # never let bookkeeping break the proxy
-        print(f"[proxy] usage parse failed: {e}", file=sys.stderr)
+        event("proxy_exception", "error", where="record", error=str(e), trace=traceback.format_exc()[-600:])
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -413,24 +683,40 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self): self.proxy()
 
     def proxy(self):
+        try:
+            self._proxy()
+        except Exception as e:  # noqa: BLE001
+            event("proxy_exception", "error", where="handler", path=self.path, error=str(e),
+                  trace=traceback.format_exc()[-800:])
+            try:
+                self.send_error(502, f"proxy error: {e}")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _proxy(self):
         global _inflight, _current
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
         is_turn = self.command == "POST" and self.path.startswith("/v1/messages")
-        req_model = None
+        req, req_model, fp = {}, None, None
         if is_turn:
             try:
                 req = json.loads(body)
                 if isinstance(req, dict):
                     req_model = req.get("model")
                 changed = isinstance(req, dict) and fold_system_messages(req)
+                if changed:
+                    event("system_folded", model=req_model, msgs=len(req.get("messages") or []))
                 if SAMPLING and isinstance(req, dict):
                     req.update(SAMPLING)
                     changed = True
                 if changed:
                     body = json.dumps(req).encode()
             except ValueError:
-                pass
+                req = {}
+            if not isinstance(req, dict):
+                req = {}
+            fp = fingerprint(req)
             ensure_warm(req_model)
             with _state:
                 _inflight += 1
@@ -452,6 +738,10 @@ class Handler(BaseHTTPRequestHandler):
             if is_turn:
                 with _state:
                     _inflight -= 1
+                event("upstream_unreachable", "error", model=req_model, error=str(e), server_up=server_up(),
+                      msgs=fp["msgs"], prompt_est=fp["est_tokens"], hint=clog.HINTS["unreachable"])
+                note_failure(502, "unreachable")
+                dump_request(body, "502")
             return
         self.send_response(resp.status, resp.reason)
         for k, v in resp.getheaders():
@@ -466,34 +756,77 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         captured = bytearray()
-        want = self.path.startswith("/v1/messages") and resp.status == 200
+        want = is_turn and resp.status == 200
+        keep = is_turn                      # error bodies are small: keep them for the event
         ttft = None
+        aborted = False                     # Claude Code hung up on us
+        upstream_err = None                 # the server died on us mid-response
         try:
             while True:
-                chunk = resp.read1(65536)   # at most one upstream read: no buffering delay
+                try:
+                    chunk = resp.read1(65536)   # at most one upstream read: no buffering delay
+                except Exception as e:  # noqa: BLE001  IncompleteRead, reset, timeout
+                    upstream_err = e
+                    break
                 if not chunk:
                     break
                 if ttft is None:
                     ttft = time.time() - t0
-                if chunked:
-                    self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
-                else:
-                    self.wfile.write(chunk)
-                self.wfile.flush()
-                if want and len(captured) < MAX_CAPTURE:
+                try:
+                    if chunked:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                    else:
+                        self.wfile.write(chunk)
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    self.close_connection = True
+                    aborted = True
+                    break
+                if keep and len(captured) < MAX_CAPTURE:
                     captured += chunk
-            if chunked:
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            self.close_connection = True
+            if chunked and not aborted:
+                try:                        # always terminate the stream so the client does not hang
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    aborted = True
+            if upstream_err is not None:
+                self.close_connection = True
         finally:
             conn.close()
             if is_turn:
                 with _state:
                     _inflight -= 1
+        if not is_turn:
+            return
+        total = time.time() - t0
+        if upstream_err is not None and not aborted:
+            event("stream_incomplete", "error", model=req_model, status=resp.status, ms=int(total * 1000),
+                  bytes=len(captured), msgs=fp["msgs"], prompt_est=fp["est_tokens"], error=repr(upstream_err),
+                  hint="the server closed the connection mid-response: the model instance died (OOM, GPU reset, "
+                       "kill) or the unit restarted. Claude Code shows this as an API error and retries; "
+                       "journalctl --user -u llama-server.service -e, dmesg for amdgpu.")
+            note_failure(resp.status, "stream_incomplete")
+            dump_request(body, "died")
+            return
+        if aborted:
+            event("client_abort", "warn", model=req_model, status=resp.status, ms=int(total * 1000),
+                  bytes=len(captured), msgs=fp["msgs"],
+                  hint="Claude Code closed the connection mid-response (Esc/Ctrl-C, or its request timeout "
+                       "after a long prefill); the server keeps generating until it notices")
+            return
+        if resp.status != 200:
+            msg = clog.error_message(bytes(captured))
+            cls = clog.classify_error(resp.status, msg)
+            event("turn_failed", "error", status=resp.status, err_class=cls, err_msg=msg, model=req_model,
+                  msgs=fp["msgs"], tools=fp["ntools"], system_chars=fp["system_chars"], prompt_est=fp["est_tokens"],
+                  ms=int(total * 1000), hint=clog.HINTS.get(cls))
+            note_failure(resp.status, cls)
+            dump_request(body, str(resp.status))
+            return
+        dump_request(body, "200")
         if want and captured:
-            record(body, bytes(captured), time.time() - t0, ttft)
+            record(req, body, bytes(captured), total, ttft, fp)
             if req_model:
                 ledger_update(req_model, time.time())
                 if CHECKPOINT_S > 0:
@@ -513,6 +846,8 @@ def main():
         except OSError:
             continue
     if srv is None:
+        event("proxy_bind_failed", "error", first=LISTEN_PORT, last=LISTEN_PORT + 19,
+              hint="20 ports in use: stale proxies from crashed sessions? pgrep -af proxy.py")
         print(f"[proxy] no free port in {LISTEN_PORT}-{LISTEN_PORT + 19}", file=sys.stderr, flush=True)
         sys.exit(1)
     bound = srv.server_address[1]
@@ -523,7 +858,8 @@ def main():
             f.write(str(bound))
     print(f"[proxy] listening on 127.0.0.1:{bound} -> {UP_HOST}:{UP_PORT}; usage -> {USAGE_LOG}; "
           f"backend {BACKEND}; checkpoint {'off' if CHECKPOINT_S <= 0 else f'{CHECKPOINT_S:g}s idle'}; "
-          f"idle unload {'off' if IDLE_UNLOAD_S <= 0 else f'{IDLE_UNLOAD_S:g}s'}",
+          f"idle unload {'off' if IDLE_UNLOAD_S <= 0 else f'{IDLE_UNLOAD_S:g}s'}"
+          f"{'; dumping requests to ' + DUMP_DIR if DUMP else ''}",
           file=sys.stderr, flush=True)
     threading.Thread(target=keeper, daemon=True).start()
     signal.signal(signal.SIGTERM, flush_and_exit)

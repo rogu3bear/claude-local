@@ -1,0 +1,8 @@
+# claude-local: unload models no session is using (see bin/claude-local-drain).
+# Installed by install.sh into ~/.config/systemd/user/, driven by claude-local-drain.timer.
+[Unit]
+Description=claude-local: drain idle models when no session uses them
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/claude-local-drain

@@ -1,0 +1,12 @@
+# claude-local: run the drain every 2 minutes. `systemctl --user list-timers` shows the last and
+# next run; `journalctl --user -u claude-local-drain.service` shows what it did.
+[Unit]
+Description=claude-local: drain idle models every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
