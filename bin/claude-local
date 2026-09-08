@@ -41,6 +41,11 @@
 #   CLAUDE_LOCAL_DISALLOWED_TOOLS  extra comma list passed as --disallowedTools (default none)
 #   CLAUDE_LOCAL_SAMPLING     JSON sampling override applied by the proxy to every request,
 #                             e.g. '{"temperature":0.7,"top_p":0.8,"top_k":20}' (default: none)
+#   CLAUDE_LOCAL_CHECKPOINT   seconds of idleness after a turn before the proxy saves the model's
+#                             prompt cache to ~/.claude-local/slots (default 20; 0 = off; llama-server
+#                             only). The proxy also reloads a preset that died and restores that
+#                             checkpoint before the next turn, and saves once more at exit, so a
+#                             server crash costs one turn and the retry starts warm.
 #   CLAUDE_LOCAL_URLGUARD     1 = the PreToolUse hook config/hook-urlguard.py denies WebFetch on a
 #                             URL that never appeared in a user message, search result or tool
 #                             output (default 1); 0 = fetch anything
@@ -72,6 +77,7 @@ TOOLS="${CLAUDE_LOCAL_TOOLS-Bash,Read,Edit,Write,Grep,Glob,Agent,WebFetch,TodoWr
 DISALLOWED_TOOLS="${CLAUDE_LOCAL_DISALLOWED_TOOLS-}"
 OFFLINE="${CLAUDE_LOCAL_OFFLINE:-0}"
 SNAPSHOT="${CLAUDE_LOCAL_SNAPSHOT:-1}"
+CHECKPOINT="${CLAUDE_LOCAL_CHECKPOINT:-20}"
 AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-local}"
 
 export CLAUDE_CONFIG_DIR="$CONFIG_DIR"
@@ -122,8 +128,12 @@ mkdir -p "$SESSION_DIR"
 export CLAUDE_LOCAL_SESSION_DIR="$SESSION_DIR"
 PROXY_PID=""
 MODELS_JSON_PATH=""
+stop_proxy() { # SIGTERM makes the proxy flush pending checkpoints; wait for that
+  [ -n "$PROXY_PID" ] || return 0
+  kill "$PROXY_PID" 2>/dev/null; wait "$PROXY_PID" 2>/dev/null; PROXY_PID=""
+}
 cleanup() {
-  [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null
+  stop_proxy
   rm -f "$MODELS_JSON_PATH"
 }
 trap cleanup EXIT
@@ -227,6 +237,7 @@ if [ "$USE_PROXY" = "1" ]; then
   rm -f "$SESSION_DIR/proxy_port"
   PROXY_PORT="$PROXY_PORT" PROXY_PORT_FILE="$SESSION_DIR/proxy_port" UPSTREAM_PORT="$PORT" \
     USAGE_LOG="$SESSION_DIR/usage.jsonl" \
+    PROXY_BACKEND="$BACKEND" PROXY_CHECKPOINT_S="$CHECKPOINT" PROXY_STATE_DIR="$RUN_ROOT" SLOTS_DIR="$CONFIG_DIR/slots" \
     PROXY_SAMPLING="${CLAUDE_LOCAL_SAMPLING:-}" PROXY_DEBUG="${CLAUDE_LOCAL_PROXY_DEBUG:-}" \
     python3 "$CONFIG_DIR/proxy.py" 2>> "$SESSION_DIR/proxy.log" &
   PROXY_PID=$!
@@ -254,6 +265,7 @@ export CLAUDE_LOCAL_TOOLS="${TOOLS}"
 export CLAUDE_LOCAL_OFFLINE="$OFFLINE"
 export CLAUDE_LOCAL_WEBSEARCH="$WEBSEARCH"
 export CLAUDE_LOCAL_URLGUARD="${CLAUDE_LOCAL_URLGUARD:-1}"
+export CLAUDE_LOCAL_CHECKPOINT="$CHECKPOINT"
 export CLAUDE_LOCAL_SNAPSHOT="$SNAPSHOT"
 export ANTHROPIC_BASE_URL="$CLAUDE_BASE_URL"
 export ANTHROPIC_AUTH_TOKEN="$AUTH_TOKEN"
@@ -268,7 +280,7 @@ date +%s > "$SESSION_DIR/session_start"
 printf '%s' "$MODEL" > "$SESSION_DIR/session_model"
 printf '%s' "${AUTOCOMPACT:-}" > "$SESSION_DIR/context_max"   # statusline gauge ceiling
 
-say "Starting Claude Code: model=${MODEL} ctx=${CTX:-?} autocompact=${AUTOCOMPACT:-auto} max_output=${MAX_OUTPUT} prompt=${PROMPT_MODE} offline=${OFFLINE} websearch=${WEBSEARCH} via ${CLAUDE_BASE_URL} (config: ${CONFIG_DIR})"
+say "Starting Claude Code: model=${MODEL} ctx=${CTX:-?} autocompact=${AUTOCOMPACT:-auto} max_output=${MAX_OUTPUT} prompt=${PROMPT_MODE} offline=${OFFLINE} websearch=${WEBSEARCH} checkpoint=${CHECKPOINT}s via ${CLAUDE_BASE_URL} (config: ${CONFIG_DIR})"
 # Claude Code reads Ctrl-C itself in raw terminal mode; ignoring INT here only
 # keeps this wrapper alive so the post-exit menu still runs.
 trap '' INT
@@ -276,6 +288,10 @@ claude --model "$MODEL" "${CLAUDE_FLAGS[@]}" "$@"
 CLAUDE_EXIT=$?
 trap - INT
 say "Claude Code exited (code ${CLAUDE_EXIT})."
+# Save the prompt cache now (auto-dehydrate): the proxy flushes on SIGTERM; without a
+# proxy the adapter saves the launch model's slot directly.
+if [ -n "$PROXY_PID" ]; then stop_proxy
+elif [ "$CHECKPOINT" != 0 ] && declare -F backend_checkpoint >/dev/null; then backend_checkpoint "$MODEL"; fi
 
 # --- 9. Post-exit model action: unload / leave / load another ------------------
 still_loaded=$(backend_loaded_names)

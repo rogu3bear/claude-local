@@ -50,3 +50,6 @@ backend_unload() {
     -d "{\"model\":\"$1\",\"prompt\":\"\",\"stream\":false,\"options\":{\"num_predict\":0},\"keep_alive\":0}" \
     >/dev/null 2>&1
 }
+
+# Ollama has no slot save/restore API: its prompt cache lives and dies with the runner.
+backend_checkpoint() { :; }

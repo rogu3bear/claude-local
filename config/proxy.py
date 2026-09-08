@@ -19,11 +19,32 @@ Env: PROXY_PORT (first port to try, default 1235; PROXY_PORT_FILE receives the b
 
 One request rewrite is always on: any `role: system` entry inside `messages` is
 moved into the top-level `system` blocks (see fold_system_messages).
+
+Checkpoint and resume (llama-server router mode, PROXY_BACKEND=llamaserver):
+  * PROXY_CHECKPOINT_S seconds after a turn completes with nothing in flight, the
+    model's slot (its prompt cache) is saved to <slot-save-path>/claude-local-<slug>.bin,
+    the same file the launcher restores at load. Measured 2026-09-08: a 10K-token
+    context is 180 MB and 250 ms each way. Pending checkpoints are flushed on SIGTERM.
+  * Before each turn the proxy checks the preset's state. A preset that died or was
+    unloaded is loaded again and its checkpoint restored; a preset whose child port
+    changed (the server restarted) gets its checkpoint restored. So a crash costs one
+    failed turn and the retry starts warm.
+  * Hybrid models (every Qwen3.6/3.8 preset here: SSM layers + attention every 4th block)
+    keep recurrent state only at the last position, and slot files carry no context
+    checkpoints. A restored sequence can therefore be *extended* (the next Claude Code
+    turn, or a retry of the failed one) at full cache hit, but not rewound: re-sending
+    an identical or shorter prompt reprocesses everything. Measured 2026-09-08.
+  Env: PROXY_BACKEND (ollama|llamaserver), PROXY_CHECKPOINT_S (0 = off),
+       PROXY_STATE_DIR (lock file dir), SLOTS_DIR (where the server writes slot files).
 """
+import fcntl
 import http.client
 import json
 import os
+import re
+import signal
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -42,6 +63,176 @@ except ValueError:
 
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
               "te", "trailers", "transfer-encoding", "upgrade", "content-length"}
+
+BACKEND = os.environ.get("PROXY_BACKEND", "ollama")
+CHECKPOINT_S = float(os.environ.get("PROXY_CHECKPOINT_S") or 0)
+STATE_DIR = os.environ.get("PROXY_STATE_DIR") or os.path.dirname(os.path.abspath(USAGE_LOG))
+SLOTS_DIR = os.environ.get("SLOTS_DIR") or os.path.expanduser("~/.claude-local/slots")
+LOAD_WAIT_S = 900
+
+
+def log(msg):
+    print(f"[proxy] {msg}", file=sys.stderr, flush=True)
+
+
+# ------------------------------------------------------------ checkpoint / resume ----
+_state = threading.Lock()      # guards _inflight and _dirty
+_warm = threading.Lock()       # one ensure_warm at a time (parallel subagents share a preset)
+_inflight = 0
+_dirty = {}                    # model -> time its last turn completed (checkpoint pending)
+_instance = {}                 # model -> child port last seen (changes when the instance restarts)
+
+
+def _slug(model):
+    """Same mapping as the adapter's _ls_slug: tr -c 'A-Za-z0-9._-' '_'."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", model)
+
+
+def slot_file(model):
+    return f"claude-local-{_slug(model)}.bin"
+
+
+def upstream_json(method, path, body=None, timeout=30):
+    conn = http.client.HTTPConnection(UP_HOST, UP_PORT, timeout=timeout)
+    try:
+        hdrs = {"content-type": "application/json"} if body is not None else {}
+        conn.request(method, path, body=json.dumps(body).encode() if body is not None else None, headers=hdrs)
+        r = conn.getresponse()
+        data = r.read()
+        try:
+            return r.status, json.loads(data or b"{}")
+        except ValueError:
+            return r.status, {}
+    finally:
+        conn.close()
+
+
+def model_state(model):
+    """(status, child port) of a router preset: loaded | loading | unloaded | failed.
+    (None, None) when the server is unreachable, not a router, or the name is unknown."""
+    try:
+        _, d = upstream_json("GET", "/models", timeout=10)
+    except OSError:
+        return None, None
+    for e in d.get("data") or []:
+        if e.get("id") != model:
+            continue
+        s = e.get("status") or {}
+        if not s:
+            return None, None
+        args = s.get("args") or []
+        port = args[args.index("--port") + 1] if "--port" in args else None
+        v = "failed" if s.get("failed") else (s.get("value") or "unloaded")
+        return v, port
+    return None, None
+
+
+def wait_loaded(model):
+    for _ in range(LOAD_WAIT_S):
+        v, port = model_state(model)
+        if v in ("loaded", "failed", None):
+            return v, port
+        time.sleep(1)
+    return "timeout", None
+
+
+def checkpoint(model, why):
+    if BACKEND != "llamaserver":
+        return
+    try:
+        with open(os.path.join(STATE_DIR, "checkpoint.lock"), "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            t0 = time.time()
+            st, d = upstream_json("POST", "/slots/0?action=save",
+                                  {"filename": slot_file(model), "model": model}, timeout=600)
+        if st == 200:
+            log(f"checkpoint {model} ({why}): {d.get('n_saved', '?')} tokens, "
+                f"{int((d.get('n_written') or 0) / 1e6)} MB, {int((time.time() - t0) * 1000)} ms")
+        else:
+            log(f"checkpoint {model} failed: HTTP {st} {json.dumps(d)[:160]}")
+    except OSError as e:
+        log(f"checkpoint {model} failed: {e}")
+
+
+def restore(model):
+    f = slot_file(model)
+    path = os.path.join(SLOTS_DIR, f)
+    if not os.path.exists(path):
+        log(f"no checkpoint on disk for {model}; first turn will be cold")
+        return
+    try:
+        st, d = upstream_json("POST", "/slots/0?action=restore", {"filename": f, "model": model}, timeout=300)
+    except OSError as e:
+        log(f"restore {model} failed: {e}")
+        return
+    if st == 200:
+        log(f"restored {model}: {d.get('n_restored', '?')} tokens, "
+            f"{int((d.get('timings') or {}).get('restore_ms') or 0)} ms")
+    else:
+        log(f"restore {model} failed: HTTP {st}; removing stale checkpoint {f}")
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def ensure_warm(model):
+    """Called before a turn is forwarded: bring a dead or unloaded preset back and restore
+    its checkpoint; restore after a server restart. Never raises; on doubt, just forward."""
+    if BACKEND != "llamaserver" or not model:
+        return
+    with _warm:
+        try:
+            v, port = model_state(model)
+            if v is None:
+                return
+            if v in ("unloaded", "failed"):
+                log(f"{model} is {v}; loading it")
+                upstream_json("POST", "/models/load", {"model": model}, timeout=30)
+                v, port = wait_loaded(model)
+                if v != "loaded":
+                    log(f"{model} did not load ({v}); forwarding anyway")
+                    return
+                restore(model)
+                _instance[model] = port
+                return
+            if v == "loading":
+                v, port = wait_loaded(model)
+                if v != "loaded":
+                    return
+            prev = _instance.get(model)
+            if prev is not None and prev != port:
+                log(f"{model} restarted (port {prev} -> {port}); restoring checkpoint")
+                restore(model)
+            _instance[model] = port
+        except Exception as e:  # noqa: BLE001 -- the turn must go through regardless
+            log(f"ensure_warm {model}: {e}")
+
+
+def keeper():
+    """Checkpoint every model whose last turn is older than CHECKPOINT_S while nothing is in flight."""
+    while True:
+        time.sleep(2)
+        if CHECKPOINT_S <= 0:
+            continue
+        now = time.time()
+        with _state:
+            if _inflight:
+                continue
+            due = [m for m, ts in _dirty.items() if now - ts >= CHECKPOINT_S]
+            for m in due:
+                del _dirty[m]
+        for m in due:
+            checkpoint(m, "idle")
+
+
+def flush_and_exit(*_):
+    with _state:
+        due = list(_dirty)
+        _dirty.clear()
+    for m in due:
+        checkpoint(m, "exit")
+    os._exit(0)
 
 
 def fold_system_messages(req: dict) -> bool:
@@ -146,11 +337,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self): self.proxy()
 
     def proxy(self):
+        global _inflight
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
-        if self.command == "POST" and self.path.startswith("/v1/messages"):
+        is_turn = self.command == "POST" and self.path.startswith("/v1/messages")
+        req_model = None
+        if is_turn:
             try:
                 req = json.loads(body)
+                if isinstance(req, dict):
+                    req_model = req.get("model")
                 changed = isinstance(req, dict) and fold_system_messages(req)
                 if SAMPLING and isinstance(req, dict):
                     req.update(SAMPLING)
@@ -159,6 +355,9 @@ class Handler(BaseHTTPRequestHandler):
                     body = json.dumps(req).encode()
             except ValueError:
                 pass
+            ensure_warm(req_model)
+            with _state:
+                _inflight += 1
         t0 = time.time()
         hdrs = {k: v for k, v in self.headers.items()
                 if k.lower() not in ("host", "connection", "content-length")}
@@ -172,6 +371,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_error(502, f"upstream error: {e}")
             conn.close()
+            if is_turn:
+                with _state:
+                    _inflight -= 1
             return
         self.send_response(resp.status, resp.reason)
         for k, v in resp.getheaders():
@@ -209,8 +411,14 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
         finally:
             conn.close()
+            if is_turn:
+                with _state:
+                    _inflight -= 1
         if want and captured:
             record(body, bytes(captured), time.time() - t0, ttft)
+            if req_model and CHECKPOINT_S > 0:
+                with _state:
+                    _dirty[req_model] = time.time()
 
 
 def main():
@@ -233,8 +441,11 @@ def main():
     if port_file:
         with open(port_file, "w") as f:
             f.write(str(bound))
-    print(f"[proxy] listening on 127.0.0.1:{bound} -> {UP_HOST}:{UP_PORT}; usage -> {USAGE_LOG}",
+    print(f"[proxy] listening on 127.0.0.1:{bound} -> {UP_HOST}:{UP_PORT}; usage -> {USAGE_LOG}; "
+          f"backend {BACKEND}; checkpoint {'off' if CHECKPOINT_S <= 0 else f'{CHECKPOINT_S:g}s idle'}",
           file=sys.stderr, flush=True)
+    threading.Thread(target=keeper, daemon=True).start()
+    signal.signal(signal.SIGTERM, flush_and_exit)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

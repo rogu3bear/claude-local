@@ -13,6 +13,7 @@ backed by a benchmark number.
     claude-local            # pick a model, go
     make check              # lint + one smoke turn through launcher and proxy
     make check-interactive  # pty-driven full session (picker, statusline, Ctrl-C, exit menu)
+    make check-checkpoint   # kill an idle llama-server model instance, expect the proxy to resume it warm
     make bench LABEL=x      # benchmark a configuration; make compare to read results
     make bench-shipped      # benchmark exactly what ships: default tool list, web search MCP, online
 
@@ -85,6 +86,23 @@ registers `config/mcp-websearch.py` via `--mcp-config` instead: a dependency-fre
 queries DuckDuckGo's HTML endpoint and shows up to the model as `mcp__websearch__web_search` (`--tools`
 only limits the built-in set; MCP tools ride along). `WebFetch` is client-side and works as is.
 `CLAUDE_LOCAL_WEBSEARCH=0` disables the server; `CLAUDE_LOCAL_OFFLINE=1` implies it.
+
+### Checkpoints and resume (llama-server)
+
+The usage proxy keeps the session warm across server trouble. Twenty seconds after a turn completes
+with nothing in flight (`CLAUDE_LOCAL_CHECKPOINT`, 0 = off) it saves the model's prompt cache to
+`~/.claude-local/slots/claude-local-<preset>.bin`, the file the launcher restores at load; measured
+2026-09-08, a 10K-token context is 180 MB and 250 ms each way. Pending saves are flushed when the
+session ends. Before every turn the proxy checks the preset: one that died (`kill -9`, OOM, a unit
+restart) is loaded again and its checkpoint restored; one whose child port changed is restored too.
+A crash therefore costs one failed turn and the retry starts warm instead of re-prefilling the
+whole context. `make check-checkpoint` proves it by killing an idle instance.
+
+One limit, measured 2026-09-08: every preset here is a hybrid model (`qwen35` / `qwen35moe`: SSM layers
+with full attention every fourth block), whose recurrent state exists only at the last position, and
+slot files carry no context checkpoints. A restored sequence can be extended, which is what the next
+turn or a retry does, but not rewound: re-sending an identical or shorter prompt reprocesses everything.
+The same applies to the launcher's restore at load.
 
 A small model also invents URLs (five non-existent GitHub repos fetched in one session). The isolated
 settings pre-allow `WebFetch` so browsing never prompts, and a PreToolUse hook (`config/hook-urlguard.py`)
@@ -187,7 +205,7 @@ Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29
 | `config/backend-llamaserver.sh` | llama-server adapter: router inventory with load state, load/unload via `/models/*` with status polling, per-model props, slot save/restore (single-model mode still supported) |
 | `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner, comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs); results in `bench/results` |
 | `skills/` | operator skills (configure/diagnose backend, manage models, tune, bench, bootstrap); linked into `~/.claude-local/skills` but only loaded when `Skill` is added to `CLAUDE_LOCAL_TOOLS`, which the 2026-09-05 measurements found to be a turn sink |
-| `test/` | smoke turn and pty-driven interactive session |
+| `test/` | smoke turn, pty-driven interactive session, checkpoint/resume test |
 
 All env overrides are listed at the top of `bin/claude-local`.
 

@@ -30,4 +30,5 @@ ok=1
 printf '%s' "$result" | grep -q SMOKEOK || ok=0
 [ "$rows" -ge 1 ] || ok=0
 printf '%s' "$banner" | grep -q 'autocompact=[0-9]' || ok=0
+printf '%s' "$banner" | grep -q 'checkpoint=[0-9]' || ok=0
 if [ "$ok" = 1 ]; then echo "SMOKE PASS"; rm -rf "$tmp"; else echo "SMOKE FAIL (stderr follows)"; cat "$tmp/err"; rm -rf "$tmp"; exit 1; fi

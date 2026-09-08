@@ -149,4 +149,8 @@ backend_unload() {
   if [ "${CLAUDE_LOCAL_LLAMA_STOP_ON_UNLOAD:-0}" = 1 ]; then systemctl --user stop "$_ls_unit" 2>/dev/null || true; fi
 }
 
+# Save the model's prompt cache without unloading (the launcher calls this at exit when
+# no proxy is running; with a proxy, proxy.py checkpoints after every idle turn).
+backend_checkpoint() { _ls_slot_save "$1"; }
+
 backend_unload_keeps_model() { [ "${CLAUDE_LOCAL_LLAMA_STOP_ON_UNLOAD:-0}" != 1 ] && ! _ls_router; }
