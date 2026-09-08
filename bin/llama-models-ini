@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# claude-local: append a preset section for every GGUF under the models dir that
+# ~/.claude-local/llama-models.ini does not mention yet, then ask the running router
+# to reload its model list. The alias is the file stem, lower-cased (rename it in
+# the INI if you want an Ollama-style name); draft models (< 2GB) are skipped.
+#   llama-models-ini [--dry-run]
+set -euo pipefail
+CONFIG="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
+INI="${LLAMA_MODELS_INI:-$CONFIG/llama-models.ini}"
+DIR="${LLAMA_MODELS_DIR:-$CONFIG/models}"
+DRY=0; [ "${1:-}" = --dry-run ] && DRY=1
+[ -r "$CONFIG/env" ] && . "$CONFIG/env"
+PORT="${CLAUDE_LOCAL_LLAMASERVER_PORT:-1244}"
+[ -f "$INI" ] || { printf 'version = 1\n' > "$INI"; echo "created $INI" >&2; }
+added=0
+for f in "$DIR"/*.gguf; do
+  [ -f "$f" ] || continue
+  [ "$(stat -c %s "$f")" -lt 2000000000 ] && continue
+  grep -qF "model = $f" "$INI" && continue
+  alias=$(basename "$f" .gguf | tr 'A-Z' 'a-z')
+  echo "adding [$alias] -> $f" >&2
+  [ "$DRY" = 1 ] || printf '\n[%s]\nmodel = %s\n' "$alias" "$f" >> "$INI"
+  added=$((added + 1))
+done
+echo "$added new preset(s); $INI" >&2
+if [ "$added" -gt 0 ] && [ "$DRY" = 0 ]; then
+  curl -sf --max-time 10 "http://127.0.0.1:${PORT}/models?reload=1" >/dev/null 2>&1 && echo "router reloaded on port $PORT" >&2 || echo "router not running on port $PORT; it will read the INI on start" >&2
+fi

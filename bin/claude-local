@@ -26,7 +26,7 @@
 #                             replace = system_prompt_compact.md instead of the built-in prompt
 #   CLAUDE_LOCAL_SNAPSHOT     1 = --system-prompt-snapshot on + exclude dynamic sections (default 1)
 #   CLAUDE_LOCAL_TOOLS        comma list passed as --tools: the ONLY tools the model sees
-#                             (default Bash,Read,Edit,Write,Grep,Glob). Measured 2026-09-05: with the
+#                             (default Bash,Read,Edit,Write,Grep,Glob,Agent,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskList,TaskUpdate,TaskGet,TaskStop,TaskOutput,ProposeGoal,ReportFindings). Measured 2026-09-05: with the
 #                             full tool list a small local model burns ~30% of its turns on
 #                             meta-tools (ReportFindings, TaskList/Create/Update, Skill, subagents),
 #                             and the schemas cost ~5K prompt tokens. Set to "" for the full list.
@@ -53,9 +53,9 @@ USE_PROXY="${CLAUDE_LOCAL_PROXY:-1}"
 PROXY_PORT="${CLAUDE_LOCAL_PROXY_PORT:-$((PORT + 1))}"
 PROMPT_MODE="${CLAUDE_LOCAL_PROMPT:-append}"
 MAX_OUTPUT="${CLAUDE_LOCAL_MAX_OUTPUT:-8192}"
-TOOLS="${CLAUDE_LOCAL_TOOLS-Bash,Read,Edit,Write,Grep,Glob}"
+TOOLS="${CLAUDE_LOCAL_TOOLS-Bash,Read,Edit,Write,Grep,Glob,Agent,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskList,TaskUpdate,TaskGet,TaskStop,TaskOutput,ProposeGoal,ReportFindings}"
 DISALLOWED_TOOLS="${CLAUDE_LOCAL_DISALLOWED_TOOLS-}"
-OFFLINE="${CLAUDE_LOCAL_OFFLINE:-1}"
+OFFLINE="${CLAUDE_LOCAL_OFFLINE:-0}"
 SNAPSHOT="${CLAUDE_LOCAL_SNAPSHOT:-1}"
 AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-local}"
 
@@ -222,6 +222,11 @@ if [ "$USE_PROXY" = "1" ]; then
 fi
 
 # --- 8. Launch Claude Code -----------------------------------------------------
+# Export operational state so the model can read its own configuration at runtime.
+export CLAUDE_LOCAL_BACKEND="$BACKEND"
+export CLAUDE_LOCAL_TOOLS="${TOOLS}"
+export CLAUDE_LOCAL_OFFLINE="$OFFLINE"
+export CLAUDE_LOCAL_SNAPSHOT="$SNAPSHOT"
 export ANTHROPIC_BASE_URL="$CLAUDE_BASE_URL"
 export ANTHROPIC_AUTH_TOKEN="$AUTH_TOKEN"
 # settings.json's env block overrides the process environment, and CLI

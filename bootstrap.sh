@@ -232,6 +232,13 @@ EOF2
     elif [ -n "$draft_path" ]; then sed -i "s|^LLAMA_ARG_SPEC_DRAFT_MODEL=.*|LLAMA_ARG_SPEC_DRAFT_MODEL=$draft_path|" "$CONFIG/llama-server.env"; fi
     say "wrote $CONFIG/llama-server.env"
   fi
+  if [ -f "$CONFIG/llama-models.ini" ]; then say "present: $CONFIG/llama-models.ini (adopted; run llama-models-ini to add new GGUFs)"
+  elif [ "$DRY" = 1 ]; then echo "  would write: $CONFIG/llama-models.ini (router presets from config/llama-models.ini.example + $MODEL_GGUF)" >&2
+  else
+    sed "s|__HOME__|$HOME|g" "$HERE/config/llama-models.ini.example" > "$CONFIG/llama-models.ini"
+    grep -qF "model = $MODEL_GGUF" "$CONFIG/llama-models.ini" || printf '\n[%s]\nmodel = %s\n' "$(printf '%s' "$MODEL" | tr ':' '-')" "$MODEL_GGUF" >> "$CONFIG/llama-models.ini"
+    say "wrote $CONFIG/llama-models.ini"
+  fi
   LUNIT="$UNIT_DIR/llama-server.service"
   if [ -e "$LUNIT" ] || [ -L "$LUNIT" ]; then
     [ -f "$LUNIT" ] || die "$LUNIT exists but is not a regular file"
@@ -254,7 +261,11 @@ EOF2
     for i in $(seq 1 600); do curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:${LLAMA_PORT}/health" && break; sleep 1; done
     curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:${LLAMA_PORT}/health" || die "llama-server did not become healthy in 600s; see: journalctl --user -u llama-server.service -e"
     systemctl --user is-active --quiet llama-server.service || die "something answers on port $LLAMA_PORT but llama-server.service is not active"
-    say "llama-server up: $(curl -sf "http://127.0.0.1:${LLAMA_PORT}/props" | jq -r '"alias=\(.model_alias) n_ctx=\(.default_generation_settings.n_ctx)"')"
+    if curl -sf "http://127.0.0.1:${LLAMA_PORT}/models" | jq -e '.data[0].status != null' >/dev/null 2>&1; then
+      say "llama-server up (router): models=$(curl -sf "http://127.0.0.1:${LLAMA_PORT}/models" | jq -r '[.data[].id] | join(",")')"
+    else
+      say "llama-server up: $(curl -sf "http://127.0.0.1:${LLAMA_PORT}/props" | jq -r '"alias=\(.model_alias) n_ctx=\(.default_generation_settings.n_ctx)"')"
+    fi
     spec_line=$(journalctl --user -u llama-server.service -n 300 --no-pager 2>/dev/null | grep -iE 'speculative|draft' | grep -viE 'n_ctx_train|control-looking' | tail -1 | sed 's/.*llama-server-run\[[0-9]*\]: //')
     say "speculative: ${spec_line:-<no draft configured>}"
   fi

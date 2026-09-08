@@ -6,13 +6,30 @@ it in the isolated config, then walks a real session: picker -> model by name
 -> TUI ready -> one prompt answered -> statusline shows proxy stats and the
 120K-window gauge -> double Ctrl-C -> wrapper's post-exit menu -> clean exit.
 
-    test/interactive.py [MODEL]          (default qwen3-coder:30b)
+    test/interactive.py [MODEL]          (default: CLAUDE_LOCAL_MODEL, else the loaded/first llama-server preset, else qwen3-coder:30b)
 
 Exit status is non-zero if any step fails. Transcript: /tmp/claude-local-interactive.bin
 """
 import json, os, pty, re, select, shutil, subprocess, sys, tempfile, time, fcntl, termios, struct
 
-MODEL = sys.argv[1] if len(sys.argv) > 1 else 'qwen3-coder:30b'
+def default_model():
+    """CLAUDE_LOCAL_MODEL, else the first llama-server preset when that backend is selected, else the Ollama baseline."""
+    if os.environ.get('CLAUDE_LOCAL_MODEL'):
+        return os.environ['CLAUDE_LOCAL_MODEL']
+    cfg = os.path.expanduser(os.environ.get('CLAUDE_LOCAL_CONFIG') or '~/.claude-local')
+    try:
+        env = subprocess.run(['bash', '-c', f'. "{cfg}/env" 2>/dev/null; echo "$CLAUDE_LOCAL_BACKEND $CLAUDE_LOCAL_PORT"'],
+                             capture_output=True, text=True).stdout.split()
+        if os.environ.get('CLAUDE_LOCAL_BACKEND', env[0] if env else '') == 'llamaserver':
+            port = os.environ.get('CLAUDE_LOCAL_PORT') or (env[1] if len(env) > 1 else '1244')
+            import json, urllib.request
+            data = json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/models', timeout=5))['data']
+            loaded = [m['id'] for m in data if (m.get('status') or {}).get('value') == 'loaded']
+            return (loaded or [m['id'] for m in data])[0]
+    except Exception:  # noqa: BLE001
+        pass
+    return 'qwen3-coder:30b'
+MODEL = sys.argv[1] if len(sys.argv) > 1 else default_model()
 CONFIG = os.environ.get('CLAUDE_LOCAL_CONFIG', os.path.expanduser('~/.claude-local'))
 CLAUDE_JSON = os.path.join(CONFIG, '.claude.json')
 LOG_PATH = '/tmp/claude-local-interactive.bin'

@@ -71,7 +71,8 @@ sequenceDiagram
 | **Statusline** | `config/statusline.sh` | Four-line cockpit showing uncached tokens, cache hit %, output throughput, and context gauge |
 | **Model Picker** | `config/picker.py` | Interactive menu of available models; non-interactive via `CLAUDE_LOCAL_MODEL` |
 | **Backend Adapter (Ollama)** | `config/backend-ollama.sh` | Ollama-specific: health check, model inventory, load/unload, context length probe |
-| **Backend Adapter (llama-server)** | `config/backend-llamaserver.sh` | llama-server-specific: 503-while-loading semantics, slot save/restore, model properties |
+| **Backend Adapter (llama-server)** | `config/backend-llamaserver.sh` | llama-server router mode: preset inventory with load state, `/models/load` + status polling, `/models/unload`, per-model props, slot save/restore (single-model layout still supported) |
+| **Model presets (llama-server)** | `~/.claude-local/llama-models.ini` | One section per GGUF: alias, file, reasoning, speculation, sampling; `bin/llama-models-ini` appends new files; `?reload=1` re-reads it |
 | **System Prompt** | `config/system_prompt.md` | Operator prompt templated with `{{MODEL}}`; appended to Claude's built-in prompt |
 | **Config** | `~/.claude-local/env` | Persisted defaults: port, backend, model — written by bootstrap |
 

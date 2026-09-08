@@ -16,6 +16,9 @@ Env: PROXY_PORT (first port to try, default 1235; PROXY_PORT_FILE receives the b
      USAGE_LOG (default ~/.claude-local/usage.jsonl),
      PROXY_DEBUG=1 adds the request's sampling params / tool count / system size to each row,
      PROXY_SAMPLING='{...}' overrides temperature/top_p/top_k on every Messages request
+
+One request rewrite is always on: any `role: system` entry inside `messages` is
+moved into the top-level `system` blocks (see fold_system_messages).
 """
 import http.client
 import json
@@ -39,6 +42,36 @@ except ValueError:
 
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
               "te", "trailers", "transfer-encoding", "upgrade", "content-length"}
+
+
+def fold_system_messages(req: dict) -> bool:
+    """Move `role: system` entries out of `messages` into the top-level `system` blocks.
+
+    Claude Code sends the Agent tool's type list as a system-role message inside the
+    conversation (after the first user turn) whenever Agent is in --tools. llama-server
+    passes it to the chat template as a mid-conversation system message; Qwen3.6's
+    template tolerated that, Qwen3.8's raises "System message must be at the beginning"
+    and the whole turn fails with HTTP 500. Folding the text into the system prompt is
+    equivalent for the model and keeps it in the cached prefix. Returns True if changed.
+    """
+    msgs = req.get("messages")
+    if not isinstance(msgs, list) or not any(isinstance(m, dict) and m.get("role") == "system" for m in msgs):
+        return False
+    system = req.get("system")
+    blocks = [{"type": "text", "text": system}] if isinstance(system, str) else list(system or [])
+    kept = []
+    for m in msgs:
+        if isinstance(m, dict) and m.get("role") == "system":
+            c = m.get("content")
+            if isinstance(c, str):
+                blocks.append({"type": "text", "text": c})
+            elif isinstance(c, list):
+                blocks.extend(b for b in c if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            kept.append(m)
+    req["messages"] = kept
+    req["system"] = blocks
+    return True
 
 
 def parse_usage(req_body: bytes, resp_body: bytes):
@@ -115,11 +148,15 @@ class Handler(BaseHTTPRequestHandler):
     def proxy(self):
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
-        if SAMPLING and self.command == "POST" and self.path.startswith("/v1/messages"):
+        if self.command == "POST" and self.path.startswith("/v1/messages"):
             try:
                 req = json.loads(body)
-                req.update(SAMPLING)
-                body = json.dumps(req).encode()
+                changed = isinstance(req, dict) and fold_system_messages(req)
+                if SAMPLING and isinstance(req, dict):
+                    req.update(SAMPLING)
+                    changed = True
+                if changed:
+                    body = json.dumps(req).encode()
             except ValueError:
                 pass
         t0 = time.time()

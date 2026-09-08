@@ -118,7 +118,7 @@ def run_one(backend, url, model, prompt, n_out, cache_prompt):
         cache_n = None
     else:
         body = {"prompt": prompt, "stream": True, "temperature": 0, "seed": 1, "n_predict": n_out,
-                "ignore_eos": True, "cache_prompt": cache_prompt}
+                "ignore_eos": True, "cache_prompt": cache_prompt, "model": model}  # model: routed in router mode, ignored single-model
         for obj in http_json(url, "/completion", body):
             if not first_tok_seen and obj.get("content"):
                 ttft = time.time() - t0; first_tok_seen = True

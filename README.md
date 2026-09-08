@@ -23,24 +23,111 @@ Two servers can be installed side by side; `CLAUDE_LOCAL_BACKEND` picks one and
 | backend | server | why |
 |---|---|---|
 | `ollama` (default) | Ollama 0.33.3, Vulkan, user unit `ollama.service` | simplest; measured baseline below |
-| `llamaserver` | upstream llama.cpp `llama-server`, user unit `llama-server.service` | HIP (ROCm) or Vulkan from the same unit, speculative decoding, on-disk prompt cache, dedicated Qwen3-Coder tool-call parser |
+| `llamaserver` | upstream llama.cpp `llama-server` in router mode, user unit `llama-server.service` | every GGUF in the INI is selectable with its own settings, HIP (ROCm) or Vulkan from the same unit, speculative decoding (incl. MTP), on-disk prompt cache, dedicated Qwen tool-call parser |
 
     CLAUDE_LOCAL_BACKEND=llamaserver claude-local     # one session on llama-server
     make check-llama                                   # smoke turn against it
     ./bootstrap.sh --backend llamaserver               # install it (needs a llama.cpp build, see below)
 
-`~/.claude-local/llama-server.env` is the whole configuration of that unit: `LLAMA_DEVICE=ROCm0|Vulkan0`
-(which implies build-hip or build-vulkan), the model GGUF (Ollama's blob is reused, no second copy),
-the alias Claude sees, and the speculative settings (`LLAMA_ARG_SPEC_TYPE=draft-simple` with the
-Qwen3-0.6B draft, `ngram-mod`/`ngram-cache` for draft-free, or commented out). Tuning that should not
-drift lives in `systemd/llama-server/10-claude-local.conf` (128K context, q8_0 KV with flash attention,
-one slot, Ollama-parity batch sizes, cache reuse). Switch device or speculation: edit one line, then
-`systemctl --user restart llama-server.service`. `/health` answers 503 for the whole load, so every
-claude-local path waits for it and never restarts a loading server.
+Two files configure the unit. `~/.claude-local/llama-server.env` holds the device
+(`LLAMA_DEVICE=ROCm0|Vulkan0`, which implies build-hip or build-vulkan) and the path of
+`~/.claude-local/llama-models.ini`, the model presets: one section per GGUF, the section
+name being the alias Claude sees, with that model's own sampling, `reasoning = on|off` and
+speculation keys (llama-server long options without the dashes). The server runs in
+llama.cpp's **router mode**: it starts without a model, `/models` lists every preset with
+its load state, and the launcher loads the one you pick on demand (`/models/load`, then
+polls the status). Up to three models stay resident (`LLAMA_ARG_MODELS_MAX=3`; two 27B-class models take
+56GB of the 108GB pool and answer independently); beyond that, picking another saves the
+least recently used model's prompt cache and evicts it. Tuning that should not drift lives in
+`systemd/llama-server/10-claude-local.conf` (128K context, q8_0 KV with flash attention, one
+slot, Ollama-parity batch sizes, cache reuse) and is inherited by every model instance.
 
-"Unload" on this backend saves slot 0's prompt cache to `~/.claude-local/slots/` and leaves the server
-up; the next launch restores it, so a fresh session starts warm even after a server restart
-(`CLAUDE_LOCAL_LLAMA_STOP_ON_UNLOAD=1` also stops the unit to free ~26GB).
+    llama-models-ini                                   # add every new GGUF under ~/.claude-local/models to the INI
+    curl -s 'http://127.0.0.1:1244/models?reload=1'    # re-read the INI without a restart (editing a section)
+    systemctl --user restart llama-server.service      # after changing the device or the drop-in
+
+`/health` is 200 as soon as the router is up; a model's readiness is its status in `/models`
+(the launcher waits on it and never restarts a loading server). "Unload" saves slot 0's prompt
+cache to `~/.claude-local/slots/<alias>.bin` and frees the model's memory; the next load restores
+the cache, so a fresh session starts warm even after a server restart. The pre-router layout
+(`LLAMA_ARG_MODEL` + `LLAMA_ARG_ALIAS` in the env file, one model per server) still works.
+
+### Models (llama-server presets, `config/llama-models.ini.example`)
+
+| alias | file | what | per-model keys |
+|---|---|---|---|
+| `qwen3.6-35b` | Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL (22.9GB) | MoE, 3B active, MTP head embedded | `reasoning = off`, `spec-type = draft-mtp`, `spec-draft-n-max = 2` (the 2026-09-06 overnight winner) |
+| `qwen3.8-27b` | Qwen3.8-27B-Q8_0 (29.0GB) | dense, thinking, MTP head embedded; reference quant | `reasoning = on`, `spec-type = draft-mtp`, `spec-draft-n-max = 4` |
+| `qwen3.8-27b-q6kxl` | Qwen3.8-27B-UD-Q6_K_XL (25.3GB) | same model, Unsloth dynamic Q6 | same |
+| `qwen3.8-27b-q6k` | Qwen3.8-27B-UD-Q6_K (22.0GB) | same model, smallest | same |
+
+Qwen's recommended sampling (`temp 0.7, top-p 0.8, top-k 20, min-p 0, presence-penalty 1.5`)
+sits in the INI's `[*]` section; `LLAMA_EXTRA_ARGS` is empty in router mode because CLI args
+beat preset keys for every instance. Section names must not contain a colon: the preset parser
+canonicalises whatever follows one as a quant tag (`qwen3.8:27b-q6k` would list as `qwen3.8:Q6K`).
+
+Qwen3.8's chat template raises on a system message that is not first, and Claude Code sends the
+Agent tool's type list as a mid-conversation `role: system` message; the usage proxy folds it
+into the system prompt (`config/proxy.py`), which is why `CLAUDE_LOCAL_PROXY=0` breaks Qwen3.8
+whenever Agent is in `--tools`.
+
+Measured 2026-09-07 (`bench/microbench.py`, cold prefill / decode at 2.7K, 10K and 30K prompt
+tokens, n_out 128, medians of 2; `bench/results/micro/micro-q38-{rocm,vulkan}.jsonl`):
+
+| preset / device | prefill tok/s 2.7K / 10K / 30K | decode tok/s 2.7K / 10K / 30K | cold TTFT 10K / 30K | warm turn TTFT 10K / 30K |
+|---|---|---|---|---|
+| `qwen3.6-35b` ROCm0 | 1079 / 1050 / 826 | 66.2 / 61.1 / 54.5 | 9s / 34s | 2.5s / 3.7s |
+| `qwen3.6-35b` Vulkan0 (2026-09-06, `micro-q36.jsonl`) | 821 / 762 / 666 | 68.8 / 65.7 / 53.9 | 13s / 45s | 3.0s / 3.8s |
+| `qwen3.8-27b` (Q8_0) ROCm0 | 334 / 318 / 248 | 7.7 / 7.6 / 7.2 | 30s / 113s | 8.4s / 11.5s |
+| `qwen3.8-27b-q6kxl` ROCm0 | 306 / 313 / 266 | 8.6 / 8.3 / 7.8 | 30s / 105s | 8.1s / 11.5s |
+| `qwen3.8-27b-q6k` ROCm0 | 291 / 299 / 258 | 9.4 / 9.4 / 8.6 | 32s / 108s | 8.5s / 11.8s |
+| `qwen3.8-27b` (Q8_0) Vulkan0 | 181 / 196 / 188 | 7.3 / 7.5 / 7.2 | 49s / 150s | 13.1s / 14.8s |
+| `qwen3.8-27b-q6kxl` Vulkan0 | 180 / 193 / 183 | 8.6 / 8.5 / 8.3 | 50s / 154s | 13.6s / 15.3s |
+| `qwen3.8-27b-q6k` Vulkan0 | 182 / 195 / 184 | 9.8 / 9.7 / 9.4 | 49s / 152s | 13.4s / 15.2s |
+
+What the numbers say:
+
+- **Dense 27B is bandwidth-bound on this iGPU: 7-10 tok/s plain decode, 8x slower than the 3B-active
+  MoE.** Q6_K buys 22% over Q8_0 for 7GB less; Q6_K_XL sits in between. The plain rows are the floor
+  the presets no longer run at: see the speculation table below.
+- **MTP speculation is the dense-model fix, and the presets ship with it.** Every unsloth Qwen3.8
+  quant carries the MTP head (`blk.64.nextn.*`), and a dense bandwidth-bound decode is exactly the
+  regime where verifying a draft costs about one token's worth of weight reads (the 2026-09-05 "spec
+  loses" result was an MoE, where a batch activates more experts). The on-disk Qwen3-0.6B draft is
+  unusable here: Qwen3.8 has a 248K-token vocabulary (Qwen3: 152K), so `draft-simple` cannot pair them.
+- **ROCm0 is the device for both families now**: 1.6x the Vulkan prefill for Qwen3.8 at equal
+  decode, 1.3x for Qwen3.6 at equal decode (the 2026-09-05 Vulkan preference was measured on
+  Qwen3-Coder). `LLAMA_DEVICE=ROCm0` on this host.
+- **Hybrid attention costs ~2K tokens of re-prefill per turn.** Both Qwen3.5-family files are
+  gated-deltanet + attention; llama-server logs `cache_reuse is not supported by this context`
+  and prompt reuse snaps to a context checkpoint, so every warm turn re-prefills 2048-2610
+  tokens where Qwen3-Coder re-prefilled 7-567 (`micro-2026-09-05.jsonl`). That is ~2s per turn
+  on Qwen3.6 and 6-8s on Qwen3.8. `LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT=1024` with 128
+  checkpoints changed nothing (`micro-q38-ckpt.jsonl`), so the defaults stay.
+- Warm-turn TTFT above already includes that re-prefill: it is the realistic per-turn floor for a
+  Claude Code session at that context depth, before any output tokens.
+
+Speculation on the dense model, ROCm0, cold prompt, n_out 128, one rep (`micro-q38-spec.jsonl`;
+acceptance from the server log on the synthetic code-rewrite output):
+
+| preset (Q8_0 unless noted) | decode tok/s 2.7K / 10K | draft acceptance, mean accepted length |
+|---|---|---|
+| plain (from the table above) | 7.7 / 7.6 | - |
+| `draft-mtp`, n-max 2 | 16.6 / 15.6 | 0.80, 2.6 |
+| **`draft-mtp`, n-max 4** (shipped) | **19.2 / 17.8** | 0.61, 3.4 |
+| `draft-mtp`, n-max 8 | 18.2 / 16.2 | 0.39, 4.0 |
+| `ngram-mod` | 8.1 / 7.9 | 0.13 |
+| UD-Q6_K + `draft-mtp` n-max 4 | 25.1 / 18.2 | 0.60, 3.3 |
+| UD-Q6_K_XL + `draft-mtp` n-max 4 | 20.4 / 16.7 | 0.54, 3.1 |
+
+At 10K prompt depth every quant lands at 17-18 tok/s: the hybrid-attention decode cost, not the
+weight bytes, sets the speed there, so Q8_0 is the default and the Q6 files only pay off at shallow
+context. A real launcher turn on `qwen3.8-27b` (MTP) logged 13.9 tok/s on an 84-token reply where
+per-turn overhead dominates. Reasoning effort (`reasoning-effort = low|medium|xhigh`, a Qwen3.8
+template feature) was sampled once per level on one coding prompt: xhigh 1887 output tokens in 103s,
+medium 1415 in 67s, low 2043 in 90s; with temperature 0.7 one sample says nothing, so the knob is
+documented, not set. The proper test is the task bench with `reasoning = off`, `reasoning-budget`
+and each effort level.
 
 ### llama.cpp build recipe (ROCm 7.14 TheRock at /opt/rocm, gfx1151)
 
@@ -55,7 +142,7 @@ up; the next launch restores it, so a fresh session starts warm even after a ser
 kernel. Ollama's own bundled ROCm 7.2 runtime segfaults on this kernel (7.0); the upstream build links
 the system ROCm and works.
 
-Memory when everything is resident: Ollama ~26GB + llama-server ~26GB + draft ~8GB of the 108GB GPU pool.
+Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29GB, see the table) of the 108GB GPU pool.
 
 ## What is here
 
@@ -63,7 +150,7 @@ Memory when everything is resident: Ollama ~26GB + llama-server ~26GB + draft ~8
 |---|---|
 | `bin/claude-local` | launcher: server check, model picker, load, autocompact fit, prompt render, usage proxy, Claude launch, post-exit menu |
 | `config/backend-ollama.sh` | backend adapter (the function contract is documented in the file) |
-| `config/proxy.py` | streaming reverse proxy that logs per-turn usage (cache hit, tok/s, latency); optional sampling override |
+| `config/proxy.py` | streaming reverse proxy that logs per-turn usage (cache hit, tok/s, latency); optional sampling override; folds Claude Code's mid-conversation `role: system` message (Agent tool type list) into the system prompt, which Qwen3.8's chat template otherwise rejects with HTTP 500 |
 | `config/statusline.sh` | four-line cockpit fed by the proxy log; per-session state |
 | `config/picker.py` | model menu, or non-interactive via `CLAUDE_LOCAL_MODEL` |
 | `config/system_prompt.md` | operator prompt appended to Claude's built-in prompt (`{{MODEL}}` templated) |
@@ -72,8 +159,8 @@ Memory when everything is resident: Ollama ~26GB + llama-server ~26GB + draft ~8
 | `systemd/ollama.service` | generic unit template (no GPU or tuning env; those are drop-ins) |
 | `systemd/10-claude-local.conf` | drop-in: flash attention, 128K context, q8_0 KV, one slot, 2h keep-alive. Flash attention lives here because q8_0 KV silently falls back to f16 without it |
 | `systemd/20-gpu-*.conf` | GPU profile drop-ins; bootstrap installs the chosen one as `20-gpu.conf` |
-| `systemd/llama-server/` | llama-server unit template and drop-in; `config/llama-server.env.example` is its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir) |
-| `config/backend-llamaserver.sh` | llama-server adapter: health with 503-while-loading semantics, models/props, slot save/restore |
+| `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=1`); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
+| `config/backend-llamaserver.sh` | llama-server adapter: router inventory with load state, load/unload via `/models/*` with status polling, per-model props, slot save/restore (single-model mode still supported) |
 | `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner, comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs); results in `bench/results` |
 | `test/` | smoke turn and pty-driven interactive session |
 

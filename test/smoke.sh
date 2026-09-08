@@ -6,7 +6,8 @@ CONFIG="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
 [ -r "$CONFIG/env" ] && . "$CONFIG/env"
 BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"; PORT="${CLAUDE_LOCAL_PORT:-1234}"
 MODEL="${1:-${CLAUDE_LOCAL_MODEL:-}}"
-if [ -z "$MODEL" ] && [ "$BACKEND" = llamaserver ]; then MODEL=$(curl -sf "http://127.0.0.1:${PORT}/v1/models" | jq -r '.data[0].id // empty'); fi
+# llama-server: the loaded model if any (router mode), else the first listed one.
+if [ -z "$MODEL" ] && [ "$BACKEND" = llamaserver ]; then MODEL=$(curl -sf "http://127.0.0.1:${PORT}/models" | jq -r '([.data[] | select(.status.value == "loaded") | .id] + [.data[].id])[0] // empty'); fi
 MODEL="${MODEL:-qwen3-coder:30b}"
 export PATH="$HOME/.local/bin:$PATH"
 tmp=$(mktemp -d); cd "$tmp"

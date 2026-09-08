@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 # claude-local: ExecStart wrapper for llama-server.service.
-# Maps LLAMA_DEVICE to a build dir and execs llama-server; every other setting
-# arrives as LLAMA_ARG_* environment (unit drop-ins + ~/.claude-local/llama-server.env).
+# Maps LLAMA_DEVICE to a build dir and execs llama-server. Two modes:
+#   router  (LLAMA_ARG_MODELS_PRESET names a readable INI): the server starts without a
+#           model and loads presets on demand; the launcher lists, loads and unloads them.
+#   single  (LLAMA_ARG_MODEL set, no INI): the pre-router layout, one model per server.
+# Every other setting arrives as LLAMA_ARG_* environment (unit drop-ins +
+# ~/.claude-local/llama-server.env) or as the CLI args below; a model instance inherits
+# both from the router, and CLI args beat preset keys, so per-model options (sampling,
+# reasoning, speculation) belong in the INI, not in LLAMA_EXTRA_ARGS.
 set -euo pipefail
 die() { echo "[llama-server-run] $*" >&2; exit 1; }
 : "${LLAMA_DEVICE:?set LLAMA_DEVICE (ROCm0|Vulkan0) in ~/.claude-local/llama-server.env}"
-: "${LLAMA_ARG_MODEL:?set LLAMA_ARG_MODEL=<gguf path> in ~/.claude-local/llama-server.env}"
+PRESET="${LLAMA_ARG_MODELS_PRESET:-}"
+if [ -n "$PRESET" ] && [ -r "$PRESET" ]; then
+  MODE=router; unset LLAMA_ARG_MODEL LLAMA_ARG_ALIAS   # a model on the env would turn router mode off
+elif [ -n "${LLAMA_ARG_MODEL:-}" ]; then
+  MODE=single; unset LLAMA_ARG_MODELS_PRESET
+  [ -r "$LLAMA_ARG_MODEL" ] || die "model not readable: $LLAMA_ARG_MODEL"
+else
+  die "set LLAMA_ARG_MODELS_PRESET=<ini> (router mode) or LLAMA_ARG_MODEL=<gguf> in ~/.claude-local/llama-server.env"
+fi
 LLAMA_CPP_DIR="${LLAMA_CPP_DIR:-$HOME/ai/llama.cpp}"
 case "$LLAMA_DEVICE" in
   ROCm*)   build=build-hip ;;
@@ -20,8 +34,11 @@ BIN="$LLAMA_CPP_DIR/$build/bin/llama-server"
 if ldd "$BIN" 2>/dev/null | grep -q 'not found'; then
   die "$BIN has unresolved libraries: $(ldd "$BIN" | grep 'not found' | tr -s ' ' | paste -sd';'); set LLAMA_LD_LIBRARY_PATH"
 fi
-[ -r "$LLAMA_ARG_MODEL" ] || die "model not readable: $LLAMA_ARG_MODEL"
 SLOTS="${LLAMA_SLOT_DIR:-$HOME/.claude-local/slots}"; mkdir -p "$SLOTS"
-echo "[llama-server-run] device=$LLAMA_DEVICE build=$build model=$(basename "$LLAMA_ARG_MODEL") alias=${LLAMA_ARG_ALIAS:-} spec=${LLAMA_ARG_SPEC_TYPE:-none} draft=${LLAMA_ARG_SPEC_DRAFT_MODEL:+$(basename "$LLAMA_ARG_SPEC_DRAFT_MODEL")}" >&2
+if [ "$MODE" = router ]; then
+  echo "[llama-server-run] mode=router device=$LLAMA_DEVICE build=$build preset=$PRESET ($(grep -c '^\[' "$PRESET") sections) models_max=${LLAMA_ARG_MODELS_MAX:-default}" >&2
+else
+  echo "[llama-server-run] mode=single device=$LLAMA_DEVICE build=$build model=$(basename "$LLAMA_ARG_MODEL") alias=${LLAMA_ARG_ALIAS:-} spec=${LLAMA_ARG_SPEC_TYPE:-none} draft=${LLAMA_ARG_SPEC_DRAFT_MODEL:+$(basename "$LLAMA_ARG_SPEC_DRAFT_MODEL")}" >&2
+fi
 # shellcheck disable=SC2086  # LLAMA_EXTRA_ARGS is deliberately word-split
 exec "$BIN" -dev "$LLAMA_DEVICE" -np "${LLAMA_ARG_N_PARALLEL:-1}" --slot-save-path "$SLOTS" --no-webui ${LLAMA_EXTRA_ARGS:-}

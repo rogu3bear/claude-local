@@ -1,0 +1,47 @@
+; claude-local: model presets for llama-server's router mode (~/.claude-local/llama-models.ini).
+; One section per model; the section name is the alias Claude, the picker and the smoke
+; test use (no colons: the parser canonicalises anything after ':' as a quant tag, so
+; qwen3.8:27b-q6k would become qwen3.8:Q6K). Keys are llama-server long options without the dashes. Edit, then reload
+; without a restart:  curl -s 'http://127.0.0.1:1244/models?reload=1' >/dev/null
+; Add every GGUF under ~/.claude-local/models that is missing here:  llama-models-ini
+; Server-wide tuning (context, KV type, batch, up to three resident models) stays in the unit
+; drop-in; device stays in llama-server.env. Both are inherited by every model instance.
+version = 1
+
+[*]
+; Qwen's recommended sampling for 3.6 and 3.8 (Claude Code sends none).
+temp = 0.7
+top-p = 0.8
+top-k = 20
+min-p = 0
+presence-penalty = 1.5
+
+; Qwen3.8-27B (dense, thinking, MTP head embedded in every unsloth quant). unsloth/Qwen3.8-27B-GGUF.
+; draft-mtp with n-max 4 measured 2026-09-07: decode 7.7 -> 19.2 tok/s (Q8_0), 9.4 -> 25.1 (Q6_K)
+; at 2.7K prompt, ~17-18 for every quant at 10K; n-max 2 = 16.6, n-max 8 = 18.2, ngram-mod = 8.1.
+; Q8_0 is the reference quant; the UD-Q6 files trade weight bytes for decode speed at shallow depth.
+[qwen3.8-27b]
+model = __HOME__/.claude-local/models/Qwen3.8-27B-Q8_0.gguf
+reasoning = on
+spec-type = draft-mtp
+spec-draft-n-max = 4
+
+[qwen3.8-27b-q6kxl]
+model = __HOME__/.claude-local/models/Qwen3.8-27B-UD-Q6_K_XL.gguf
+reasoning = on
+spec-type = draft-mtp
+spec-draft-n-max = 4
+
+[qwen3.8-27b-q6k]
+model = __HOME__/.claude-local/models/Qwen3.8-27B-UD-Q6_K.gguf
+reasoning = on
+spec-type = draft-mtp
+spec-draft-n-max = 4
+
+; Qwen3.6-35B-A3B (MoE, MTP head embedded). Non-thinking + draft-mtp n-max 2 is the
+; configuration that won the 2026-09-06 overnight bench (27/27, 12.3s mean).
+[qwen3.6-35b]
+model = __HOME__/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+reasoning = off
+spec-type = draft-mtp
+spec-draft-n-max = 2
