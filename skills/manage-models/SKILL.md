@@ -60,7 +60,7 @@ curl -sf http://localhost:$PORT/api/ps | jq '.models[].name'
 ### llama-server
 
 llama-server runs in router mode: the unit starts without a model and loads presets on demand,
-up to three resident (`LLAMA_ARG_MODELS_MAX=3`; a fourth load evicts the least recently used).
+up to two resident (`LLAMA_ARG_MODELS_MAX=2`; a third load evicts the least recently used after the proxy has checkpointed it). The usage proxy also unloads a preset no session has used for 20 minutes (`CLAUDE_LOCAL_IDLE_UNLOAD`).
 The launcher does all of this; by hand:
 
 ```bash
@@ -97,7 +97,7 @@ On this machine's ~108GB GPU pool:
 | `qwen3.8-27b-q6k` | Qwen3.8-27B-UD-Q6_K | 22.0GB | 25 ROCm with MTP (9.4 plain); ~18 for every quant at 10K depth | ~9s |
 | qwen3-coder:30b (Ollama) | Q4_K_M | 18GB | ~70 Vulkan | ~60s cold |
 
-The router keeps up to three llama-server models resident (`LLAMA_ARG_MODELS_MAX=3`; Qwen3.6 + Qwen3.8 together
+The router keeps up to two llama-server models resident (`LLAMA_ARG_MODELS_MAX=2`; Qwen3.6 + Qwen3.8 together
 take 56GB of the 108GB pool). A dense 27B decodes roughly 8x slower than the 3B-active MoE on this iGPU
 because decode is bound by weight bandwidth; MTP speculation (every Qwen3.8 quant carries the head) brings
 it to 2.5x plain, which is why the presets ship with `spec-type = draft-mtp`.

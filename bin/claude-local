@@ -46,6 +46,13 @@
 #                             only). The proxy also reloads a preset that died and restores that
 #                             checkpoint before the next turn, and saves once more at exit, so a
 #                             server crash costs one turn and the retry starts warm.
+#   CLAUDE_LOCAL_IDLE_UNLOAD  seconds a resident preset may go unused by every session before the
+#                             proxy checkpoints and unloads it (default 1200; 0 = off; llama-server
+#                             only; never the session's own model). Last use is shared through
+#                             run/last_use.json, so concurrent sessions do not evict each other's model.
+#   CLAUDE_LOCAL_EXCLUSIVE    1 = at start, evict whatever the *other* backend has loaded (Ollama
+#                             models via keep_alive 0; llama-server presets after a checkpoint) so
+#                             two servers never share the GPU pool (default 1); 0 = leave them
 #   CLAUDE_LOCAL_URLGUARD     1 = the PreToolUse hook config/hook-urlguard.py denies WebFetch on a
 #                             URL that never appeared in a user message, search result or tool
 #                             output (default 1); 0 = fetch anything
@@ -78,6 +85,8 @@ DISALLOWED_TOOLS="${CLAUDE_LOCAL_DISALLOWED_TOOLS-}"
 OFFLINE="${CLAUDE_LOCAL_OFFLINE:-0}"
 SNAPSHOT="${CLAUDE_LOCAL_SNAPSHOT:-1}"
 CHECKPOINT="${CLAUDE_LOCAL_CHECKPOINT:-20}"
+IDLE_UNLOAD="${CLAUDE_LOCAL_IDLE_UNLOAD:-1200}"
+EXCLUSIVE="${CLAUDE_LOCAL_EXCLUSIVE:-1}"
 AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-local}"
 
 export CLAUDE_CONFIG_DIR="$CONFIG_DIR"
@@ -114,6 +123,28 @@ if ! backend_up; then
   fi
 fi
 say "Server is up at ${BASE_URL}"
+
+# --- 1b. One server on the GPU pool at a time ---------------------------------
+# Ollama and llama-server share the same unified memory; a model left resident on the
+# other one is the realistic way to run the pool out. Evict it (llama-server presets get
+# their prompt cache saved first, so they come back warm).
+if [ "$EXCLUSIVE" = 1 ]; then
+  if [ "$BACKEND" = llamaserver ]; then
+    OP="http://localhost:${CLAUDE_LOCAL_OLLAMA_PORT:-1234}"
+    for m in $(curl -s --max-time 2 "$OP/api/ps" 2>/dev/null | jq -r '[.models[].name] | join(" ")' 2>/dev/null); do
+      say "Evicting $m from Ollama (CLAUDE_LOCAL_EXCLUSIVE=0 keeps it)"
+      curl -s --max-time 600 "$OP/api/generate" -d "{\"model\":\"$m\",\"prompt\":\"\",\"stream\":false,\"options\":{\"num_predict\":0},\"keep_alive\":0}" >/dev/null 2>&1
+    done
+  else
+    LP="http://localhost:${CLAUDE_LOCAL_LLAMASERVER_PORT:-1244}"
+    for m in $(curl -sf --max-time 2 "$LP/models" 2>/dev/null | jq -r '[.data[] | select(.status.value == "loaded") | .id] | join(" ")' 2>/dev/null); do
+      say "Dehydrating $m on llama-server (CLAUDE_LOCAL_EXCLUSIVE=0 keeps it)"
+      f="claude-local-$(printf '%s' "$m" | tr -c 'A-Za-z0-9._-' '_').bin"
+      curl -s --max-time 600 -X POST "$LP/slots/0?action=save" -H 'content-type: application/json' -d "{\"filename\":\"$f\",\"model\":\"$m\"}" >/dev/null 2>&1
+      curl -s --max-time 60 -X POST "$LP/models/unload" -H 'content-type: application/json' -d "{\"model\":\"$m\"}" >/dev/null 2>&1
+    done
+  fi
+fi
 
 # --- 2. Per-session state dir (so concurrent sessions never share files) --------
 RUN_ROOT="$CONFIG_DIR/run"
@@ -173,6 +204,17 @@ if [ "$ACTION" = "LOAD" ]; then
 else
   say "Model ${MODEL} is already loaded."
 fi
+# Mark the model used now, so another session's idle-unload pass leaves it alone.
+python3 - "$RUN_ROOT/last_use.json" "$MODEL" <<'LEDGER' 2>/dev/null || true
+import fcntl, json, os, sys, time
+p, m = sys.argv[1], sys.argv[2]
+with open(p + ".lock", "w") as lf:
+    fcntl.flock(lf, fcntl.LOCK_EX)
+    try: d = json.load(open(p))
+    except (OSError, ValueError): d = {}
+    d[m] = time.time()
+    json.dump(d, open(p + ".tmp", "w")); os.replace(p + ".tmp", p)
+LEDGER
 
 # --- 5. Match Claude's context assumptions to the server's real context --------
 # Claude Code assumes 200K for unknown models. If the server's context is
@@ -237,7 +279,7 @@ if [ "$USE_PROXY" = "1" ]; then
   rm -f "$SESSION_DIR/proxy_port"
   PROXY_PORT="$PROXY_PORT" PROXY_PORT_FILE="$SESSION_DIR/proxy_port" UPSTREAM_PORT="$PORT" \
     USAGE_LOG="$SESSION_DIR/usage.jsonl" \
-    PROXY_BACKEND="$BACKEND" PROXY_CHECKPOINT_S="$CHECKPOINT" PROXY_STATE_DIR="$RUN_ROOT" SLOTS_DIR="$CONFIG_DIR/slots" \
+    PROXY_BACKEND="$BACKEND" PROXY_CHECKPOINT_S="$CHECKPOINT" PROXY_IDLE_UNLOAD_S="$IDLE_UNLOAD" PROXY_STATE_DIR="$RUN_ROOT" SLOTS_DIR="$CONFIG_DIR/slots" \
     PROXY_SAMPLING="${CLAUDE_LOCAL_SAMPLING:-}" PROXY_DEBUG="${CLAUDE_LOCAL_PROXY_DEBUG:-}" \
     python3 "$CONFIG_DIR/proxy.py" 2>> "$SESSION_DIR/proxy.log" &
   PROXY_PID=$!
@@ -266,6 +308,8 @@ export CLAUDE_LOCAL_OFFLINE="$OFFLINE"
 export CLAUDE_LOCAL_WEBSEARCH="$WEBSEARCH"
 export CLAUDE_LOCAL_URLGUARD="${CLAUDE_LOCAL_URLGUARD:-1}"
 export CLAUDE_LOCAL_CHECKPOINT="$CHECKPOINT"
+export CLAUDE_LOCAL_IDLE_UNLOAD="$IDLE_UNLOAD"
+export CLAUDE_LOCAL_EXCLUSIVE="$EXCLUSIVE"
 export CLAUDE_LOCAL_SNAPSHOT="$SNAPSHOT"
 export ANTHROPIC_BASE_URL="$CLAUDE_BASE_URL"
 export ANTHROPIC_AUTH_TOKEN="$AUTH_TOKEN"
@@ -280,7 +324,7 @@ date +%s > "$SESSION_DIR/session_start"
 printf '%s' "$MODEL" > "$SESSION_DIR/session_model"
 printf '%s' "${AUTOCOMPACT:-}" > "$SESSION_DIR/context_max"   # statusline gauge ceiling
 
-say "Starting Claude Code: model=${MODEL} ctx=${CTX:-?} autocompact=${AUTOCOMPACT:-auto} max_output=${MAX_OUTPUT} prompt=${PROMPT_MODE} offline=${OFFLINE} websearch=${WEBSEARCH} checkpoint=${CHECKPOINT}s via ${CLAUDE_BASE_URL} (config: ${CONFIG_DIR})"
+say "Starting Claude Code: model=${MODEL} ctx=${CTX:-?} autocompact=${AUTOCOMPACT:-auto} max_output=${MAX_OUTPUT} prompt=${PROMPT_MODE} offline=${OFFLINE} websearch=${WEBSEARCH} checkpoint=${CHECKPOINT}s idle_unload=${IDLE_UNLOAD}s via ${CLAUDE_BASE_URL} (config: ${CONFIG_DIR})"
 # Claude Code reads Ctrl-C itself in raw terminal mode; ignoring INT here only
 # keeps this wrapper alive so the post-exit menu still runs.
 trap '' INT

@@ -14,6 +14,7 @@ backed by a benchmark number.
     make check              # lint + one smoke turn through launcher and proxy
     make check-interactive  # pty-driven full session (picker, statusline, Ctrl-C, exit menu)
     make check-checkpoint   # kill an idle llama-server model instance, expect the proxy to resume it warm
+    make check-idle         # load a throwaway preset, expect the proxy to checkpoint and unload it when idle
     make bench LABEL=x      # benchmark a configuration; make compare to read results
     make bench-shipped      # benchmark exactly what ships: default tool list, web search MCP, online
 
@@ -38,9 +39,9 @@ name being the alias Claude sees, with that model's own sampling, `reasoning = o
 speculation keys (llama-server long options without the dashes). The server runs in
 llama.cpp's **router mode**: it starts without a model, `/models` lists every preset with
 its load state, and the launcher loads the one you pick on demand (`/models/load`, then
-polls the status). Up to three models stay resident (`LLAMA_ARG_MODELS_MAX=3`; two 27B-class models take
-56GB of the 108GB pool and answer independently); beyond that, picking another saves the
-least recently used model's prompt cache and evicts it. Tuning that should not drift lives in
+polls the status). Up to two models stay resident (`LLAMA_ARG_MODELS_MAX=2`; two 27B-class models take
+56GB of the 108GB pool and answer independently, leaving room for KV, the RAM prompt cache and the
+desktop); beyond that, picking another saves the least recently used model's prompt cache and evicts it. Tuning that should not drift lives in
 `systemd/llama-server/10-claude-local.conf` (128K context, q8_0 KV with flash attention, one
 slot, Ollama-parity batch sizes, cache reuse) and is inherited by every model instance.
 
@@ -103,6 +104,14 @@ with full attention every fourth block), whose recurrent state exists only at th
 slot files carry no context checkpoints. A restored sequence can be extended, which is what the next
 turn or a retry does, but not rewound: re-sending an identical or shorter prompt reprocesses everything.
 The same applies to the launcher's restore at load.
+
+The proxy also dehydrates what nobody is using. Every turn records its model in `run/last_use.json`,
+shared by all sessions; a resident preset unused for 20 minutes (`CLAUDE_LOCAL_IDLE_UNLOAD`, 0 = off)
+that is not the session's own model is checkpointed and unloaded, and comes back warm through the same
+resume path when a session next needs it. `make check-idle` proves it with a throwaway preset. At start
+the launcher also evicts whatever the *other* server holds (`CLAUDE_LOCAL_EXCLUSIVE`, default 1): Ollama
+models via a zero keep-alive, llama-server presets after a checkpoint. Ollama and llama-server share
+one memory pool, and two servers each holding a model is the realistic way to run it out.
 
 A small model also invents URLs (five non-existent GitHub repos fetched in one session). The isolated
 settings pre-allow `WebFetch` so browsing never prompts, and a PreToolUse hook (`config/hook-urlguard.py`)
@@ -201,7 +210,7 @@ Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29
 | `systemd/ollama.service` | generic unit template (no GPU or tuning env; those are drop-ins) |
 | `systemd/10-claude-local.conf` | drop-in: flash attention, 128K context, q8_0 KV, one slot, 2h keep-alive. Flash attention lives here because q8_0 KV silently falls back to f16 without it |
 | `systemd/20-gpu-*.conf` | GPU profile drop-ins; bootstrap installs the chosen one as `20-gpu.conf` |
-| `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=3`); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
+| `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=2`); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
 | `config/backend-llamaserver.sh` | llama-server adapter: router inventory with load state, load/unload via `/models/*` with status polling, per-model props, slot save/restore (single-model mode still supported) |
 | `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner, comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs); results in `bench/results` |
 | `skills/` | operator skills (configure/diagnose backend, manage models, tune, bench, bootstrap); linked into `~/.claude-local/skills` but only loaded when `Skill` is added to `CLAUDE_LOCAL_TOOLS`, which the 2026-09-05 measurements found to be a turn sink |

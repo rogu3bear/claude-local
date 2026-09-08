@@ -6,7 +6,7 @@
 # Router mode (default since 2026-09-07): the server starts without a model and every
 # INI section is a model it loads on demand. /models lists them with a status
 # (unloaded | loading | loaded, plus failed:true), /models/load and /models/unload
-# switch, and up to LLAMA_ARG_MODELS_MAX models stay resident (3 in the drop-in;
+# switch, and up to LLAMA_ARG_MODELS_MAX models stay resident (2 in the drop-in;
 # one more load evicts the least recently used). POST requests name the model in
 # the JSON body, GET endpoints in ?model=. The pre-router single-model layout
 # (LLAMA_ARG_MODEL in the env file) still works: /models has no status field there

@@ -4,7 +4,7 @@
 ; qwen3.8:27b-q6k would become qwen3.8:Q6K). Keys are llama-server long options without the dashes. Edit, then reload
 ; without a restart:  curl -s 'http://127.0.0.1:1244/models?reload=1' >/dev/null
 ; Add every GGUF under ~/.claude-local/models that is missing here:  llama-models-ini
-; Server-wide tuning (context, KV type, batch, up to three resident models) stays in the unit
+; Server-wide tuning (context, KV type, batch, up to two resident models) stays in the unit
 ; drop-in; device stays in llama-server.env. Both are inherited by every model instance.
 version = 1
 

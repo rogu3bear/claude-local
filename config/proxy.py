@@ -34,8 +34,13 @@ Checkpoint and resume (llama-server router mode, PROXY_BACKEND=llamaserver):
     checkpoints. A restored sequence can therefore be *extended* (the next Claude Code
     turn, or a retry of the failed one) at full cache hit, but not rewound: re-sending
     an identical or shorter prompt reprocesses everything. Measured 2026-09-08.
+  * Idle unload: every turn's model and time go to PROXY_STATE_DIR/last_use.json, shared by
+    all sessions' proxies. A resident preset that no session has used for PROXY_IDLE_UNLOAD_S
+    seconds, and that is not this session's current model, is checkpointed and unloaded
+    ("dehydrated"); whoever needs it next gets it back warm through ensure_warm.
   Env: PROXY_BACKEND (ollama|llamaserver), PROXY_CHECKPOINT_S (0 = off),
-       PROXY_STATE_DIR (lock file dir), SLOTS_DIR (where the server writes slot files).
+       PROXY_IDLE_UNLOAD_S (0 = off), PROXY_STATE_DIR (ledger + lock files),
+       SLOTS_DIR (where the server writes slot files).
 """
 import fcntl
 import http.client
@@ -66,6 +71,7 @@ HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authoriza
 
 BACKEND = os.environ.get("PROXY_BACKEND", "ollama")
 CHECKPOINT_S = float(os.environ.get("PROXY_CHECKPOINT_S") or 0)
+IDLE_UNLOAD_S = float(os.environ.get("PROXY_IDLE_UNLOAD_S") or 0)
 STATE_DIR = os.environ.get("PROXY_STATE_DIR") or os.path.dirname(os.path.abspath(USAGE_LOG))
 SLOTS_DIR = os.environ.get("SLOTS_DIR") or os.path.expanduser("~/.claude-local/slots")
 LOAD_WAIT_S = 900
@@ -81,6 +87,36 @@ _warm = threading.Lock()       # one ensure_warm at a time (parallel subagents s
 _inflight = 0
 _dirty = {}                    # model -> time its last turn completed (checkpoint pending)
 _instance = {}                 # model -> child port last seen (changes when the instance restarts)
+_current = None                # model this session's last turn used: never idle-unloaded by us
+_first_seen = {}               # model -> when we first saw it resident without a ledger entry
+LEDGER = os.path.join(STATE_DIR, "last_use.json")
+
+
+def ledger_update(model, ts):
+    """Record a model's last use, shared across sessions (flock, atomic replace)."""
+    try:
+        with open(LEDGER + ".lock", "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                with open(LEDGER) as f:
+                    d = json.load(f)
+            except (OSError, ValueError):
+                d = {}
+            d[model] = ts
+            tmp = LEDGER + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(d, f)
+            os.replace(tmp, LEDGER)
+    except OSError as e:
+        log(f"ledger update failed: {e}")
+
+
+def ledger_read():
+    try:
+        with open(LEDGER) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
 def _slug(model):
@@ -209,21 +245,61 @@ def ensure_warm(model):
             log(f"ensure_warm {model}: {e}")
 
 
-def keeper():
-    """Checkpoint every model whose last turn is older than CHECKPOINT_S while nothing is in flight."""
-    while True:
-        time.sleep(2)
-        if CHECKPOINT_S <= 0:
+def loaded_presets():
+    try:
+        _, d = upstream_json("GET", "/models", timeout=10)
+    except OSError:
+        return []
+    return [e["id"] for e in d.get("data") or [] if (e.get("status") or {}).get("value") == "loaded"]
+
+
+def idle_unload_pass():
+    """Dehydrate resident presets nobody has used for IDLE_UNLOAD_S (never this session's model)."""
+    now = time.time()
+    led = ledger_read()
+    for m in loaded_presets():
+        if m == _current:
             continue
-        now = time.time()
+        last = led.get(m)
+        if last is None:                      # loaded outside any session: age it from first sight
+            last = _first_seen.setdefault(m, now)
+        if now - last < IDLE_UNLOAD_S:
+            continue
         with _state:
             if _inflight:
-                continue
-            due = [m for m, ts in _dirty.items() if now - ts >= CHECKPOINT_S]
+                return
+            _dirty.pop(m, None)
+        log(f"{m} unused for {int((now - last) / 60)} min; dehydrating")
+        checkpoint(m, "idle-unload")
+        try:
+            st, _ = upstream_json("POST", "/models/unload", {"model": m}, timeout=60)
+            log(f"unloaded {m}" if st == 200 else f"unload {m}: HTTP {st}")
+        except OSError as e:
+            log(f"unload {m} failed: {e}")
+        _instance.pop(m, None)
+        _first_seen.pop(m, None)
+
+
+def keeper():
+    """Checkpoint every model whose last turn is older than CHECKPOINT_S while nothing is in
+    flight; every 30 s, dehydrate presets idle for IDLE_UNLOAD_S."""
+    last_idle_pass = time.time()
+    while True:
+        time.sleep(2)
+        now = time.time()
+        if CHECKPOINT_S > 0:
+            with _state:
+                due = [] if _inflight else [m for m, ts in _dirty.items() if now - ts >= CHECKPOINT_S]
+                for m in due:
+                    del _dirty[m]
             for m in due:
-                del _dirty[m]
-        for m in due:
-            checkpoint(m, "idle")
+                checkpoint(m, "idle")
+        if IDLE_UNLOAD_S > 0 and BACKEND == "llamaserver" and now - last_idle_pass >= 30:
+            last_idle_pass = now
+            try:
+                idle_unload_pass()
+            except Exception as e:  # noqa: BLE001
+                log(f"idle unload pass: {e}")
 
 
 def flush_and_exit(*_):
@@ -337,7 +413,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self): self.proxy()
 
     def proxy(self):
-        global _inflight
+        global _inflight, _current
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
         is_turn = self.command == "POST" and self.path.startswith("/v1/messages")
@@ -358,6 +434,8 @@ class Handler(BaseHTTPRequestHandler):
             ensure_warm(req_model)
             with _state:
                 _inflight += 1
+                if req_model:
+                    _current = req_model
         t0 = time.time()
         hdrs = {k: v for k, v in self.headers.items()
                 if k.lower() not in ("host", "connection", "content-length")}
@@ -416,9 +494,11 @@ class Handler(BaseHTTPRequestHandler):
                     _inflight -= 1
         if want and captured:
             record(body, bytes(captured), time.time() - t0, ttft)
-            if req_model and CHECKPOINT_S > 0:
-                with _state:
-                    _dirty[req_model] = time.time()
+            if req_model:
+                ledger_update(req_model, time.time())
+                if CHECKPOINT_S > 0:
+                    with _state:
+                        _dirty[req_model] = time.time()
 
 
 def main():
@@ -442,7 +522,8 @@ def main():
         with open(port_file, "w") as f:
             f.write(str(bound))
     print(f"[proxy] listening on 127.0.0.1:{bound} -> {UP_HOST}:{UP_PORT}; usage -> {USAGE_LOG}; "
-          f"backend {BACKEND}; checkpoint {'off' if CHECKPOINT_S <= 0 else f'{CHECKPOINT_S:g}s idle'}",
+          f"backend {BACKEND}; checkpoint {'off' if CHECKPOINT_S <= 0 else f'{CHECKPOINT_S:g}s idle'}; "
+          f"idle unload {'off' if IDLE_UNLOAD_S <= 0 else f'{IDLE_UNLOAD_S:g}s'}",
           file=sys.stderr, flush=True)
     threading.Thread(target=keeper, daemon=True).start()
     signal.signal(signal.SIGTERM, flush_and_exit)
