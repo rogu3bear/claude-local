@@ -26,7 +26,7 @@ Environment=LLAMA_ARG_FLASH_ATTN=on             # flash attention (required for 
 Environment=LLAMA_ARG_CACHE_TYPE_K=q8_0         # K cache quantized (faster on iGPU)
 Environment=LLAMA_ARG_CACHE_TYPE_V=q8_0         # V cache quantized
 Environment=LLAMA_ARG_CACHE_REUSE=256           # KV shift cache reuse distance
-Environment=LLAMA_ARG_CACHE_RAM=8192            # keep prompt cache in RAM (not swap)
+Environment=LLAMA_ARG_CACHE_RAM=32768           # keep prompt cache in RAM (not swap)
 Environment=LLAMA_ARG_BATCH=2048                # batch size (Ollama parity)
 Environment=LLAMA_ARG_UBATCH=2048               # micro-batch size
 ```
@@ -144,7 +144,7 @@ Then: `systemctl --user restart ollama.service`
 **Trade-offs:**
 - Larger context = more VRAM for KV cache (q8_0 at 256K ≈ +1.3GB over 128K)
 - Decode throughput drops with context depth (bandwidth-bound attention)
-- Claude's autocompact floor is 100K — server context must be >= 100K + max_output(8192) + 2048 = ~110K minimum
+- Claude's autocompact floor is 100K — server context must be >= 100K + max_output(16384) + 2048 = ~118K minimum
 
 ## Speculative decoding
 
@@ -219,9 +219,9 @@ Environment=LLAMA_ARG_FLASH_ATTN=on    # required for q8_0 KV
 **Cache reuse and RAM:**
 ```ini
 Environment=LLAMA_ARG_CACHE_REUSE=256   # KV shift cache reuse distance
-Environment=LLAMA_ARG_CACHE_RAM=8192    # keep prompt cache in RAM (not swap)
+Environment=LLAMA_ARG_CACHE_RAM=32768   # keep prompt cache in RAM (not swap)
 ```
-Higher `CACHE_RAM` keeps more prompts in RAM for faster slot restores. 8192 tokens is the default and works for typical sessions.
+Higher `CACHE_RAM` (MiB) keeps more evicted contexts in RAM, about 1GB per 10K tokens. 32768 is the default since 2026-09-08 so a parent context survives its subagents taking the single slot; the host has 125GB.
 
 ## Batch size tuning
 

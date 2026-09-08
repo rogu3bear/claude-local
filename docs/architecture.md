@@ -33,7 +33,7 @@ flowchart TD
 
     U -->|"1. picks model, loads it"| O
     U -->|"2. starts proxy on free port"| P
-    U -->|"3. launches Claude Code<br/>--model qwen3.6:35b<br/>--autocompact 120832<br/>--tools Bash,Read,...<br/>--mcp-config websearch<br/>ANTHROPIC_BASE_URL=http://proxy"| CC
+    U -->|"3. launches Claude Code<br/>--model qwen3.6:35b<br/>--autocompact 112640<br/>--tools Bash,Read,...<br/>--mcp-config websearch<br/>ANTHROPIC_BASE_URL=http://proxy"| CC
 
     CC -->|"4. /v1/messages<br/>streaming SSE"| P
     CC -->|"web_search tool calls"| WS
@@ -87,7 +87,7 @@ sequenceDiagram
 - **Isolated config directory** — `~/.claude-local/` is fully separate from `~/.claude/`. Your project-level Claude Code setup is never touched.
 - **Offline on request** — `CLAUDE_LOCAL_OFFLINE=1` points `HTTPS_PROXY` at a dead port with localhost bypassed. Project CLAUDE.md files still load. Default 0 since 2026-09-07 so WebFetch and the web search MCP server work.
 - **Web search via MCP** — the built-in WebSearch is executed by Anthropic's API and returns nothing against a local server, so the launcher registers `config/mcp-websearch.py` (DuckDuckGo, stdio) with `--mcp-config`; `--tools` limits only the built-in set, MCP tools ride along.
-- **Autocompact fitted to server context** — Claude Code assumes 200K for unknown models. The launcher computes `autocompact = server_context - max_output(8192) - 2048` so prompt + generation always fit before compacting. Floor: 100K.
+- **Autocompact fitted to server context** — Claude Code assumes 200K for unknown models. The launcher computes `autocompact = server_context - max_output(16384) - 2048` so prompt + generation always fit before compacting. Floor: 100K.
 - **Checkpoint and resume** — the proxy saves the model's prompt cache to disk after each idle turn and at exit, and before every turn reloads a dead preset and restores that file (or restores after a server restart). Warm state survives crashes; the launcher restores the same file at load.
 - **Idle unload and one server at a time** — a shared last-use ledger lets any session's proxy checkpoint and unload a preset nobody has used for 20 minutes (never its own); the launcher evicts whatever the other backend holds at start. Two resident presets max.
 - **Attribution header disabled** — `CLAUDE_CODE_ATTRIBUTION_HEADER=0` keeps the system prompt byte-identical across turns, preserving the server's prefix cache.

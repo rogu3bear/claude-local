@@ -61,7 +61,7 @@ The statusline also shows context pressure (the gauge bar), thinking state, and 
    ```bash
    cat ~/.claude-local/run/*/context_max 2>/dev/null
    ```
-   If autocompact is too small, the prompt gets truncated mid-session, busting cache. The launcher computes: `autocompact = server_context - max_output(8192) - 2048`. Floor is 100K.
+   If autocompact is too small, the prompt gets truncated mid-session, busting cache. The launcher computes: `autocompact = server_context - max_output(16384) - 2048`. Floor is 100K.
 
 3. **Check tool surface:**
    ```bash
@@ -113,10 +113,10 @@ Measured impact: 49s → 21.4s mean wall/task on this hardware. The tool schemas
 If the server has a smaller context than Claude's 200K assumption, set autocompact explicitly:
 ```bash
 # In ~/.claude-local/env or as env override
-CLAUDE_LOCAL_AUTOCOMPACT=120832
+CLAUDE_LOCAL_AUTOCOMPACT=112640
 ```
 
-The formula: `server_context - CLAUDE_LOCAL_MAX_OUTPUT(8192) - 2048`. Must be >= 100K (Claude's floor).
+The formula: `server_context - CLAUDE_LOCAL_MAX_OUTPUT(16384) - 2048`. Must be >= 100K (Claude's floor).
 
 ### Adjust sampling via proxy
 

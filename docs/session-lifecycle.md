@@ -31,7 +31,7 @@ flowchart TD
     O -->|no| P["Connect directly,<br/>skip proxy logging"]
     O -->|yes| Q["Route through proxy"]
 
-    P --> R[Compute autocompact:<br/>ctx - max_output(8192) - 2048<br/>floor 100K]
+    P --> R[Compute autocompact:<br/>ctx - max_output(16384) - 2048<br/>floor 100K]
     Q --> R
 
     R --> S[Render system prompt<br/>template {{MODEL}}]

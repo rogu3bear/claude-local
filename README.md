@@ -237,7 +237,7 @@ All env overrides are listed at the top of `bin/claude-local`.
 - Q8 decodes slower on this iGPU (bandwidth-bound on weight size) and showed no accuracy gain. Not default.
 - Compact prompt is 30% faster and skips edge-case verification. Opt-in only.
 - Claude assumes a 200K window for unknown models; the launcher sets autocompact to
-  server context - max output (8192) - 2048 so prompt + generation always fit, and the statusline gauge uses that.
+  server context - max output (16384) - 2048 so prompt + generation always fit, and the statusline gauge uses that.
 - settings.json `env` overrides the process environment, and `--settings` overrides settings.json;
   the proxy URL is passed via `--settings` for that reason. The `env` block pins the llama-server port
   (1244), so `CLAUDE_CONFIG_DIR=~/.claude-local claude` without the launcher talks to that server or

@@ -4,7 +4,7 @@
 Creates a throwaway git repo, pre-accepts Claude's workspace-trust dialog for
 it in the isolated config, then walks a real session: picker -> model by name
 -> banner says websearch=1 -> TUI ready -> one prompt answered -> statusline names
-the launched model and shows proxy stats and the 120K-window gauge -> /mcp lists the
+the launched model and shows proxy stats and the fitted context gauge -> /mcp lists the
 websearch server as connected -> double Ctrl-C -> wrapper's post-exit menu -> clean exit.
 
     test/interactive.py [MODEL]          (default: CLAUDE_LOCAL_MODEL, else the loaded/first llama-server preset, else qwen3-coder:30b)
@@ -84,7 +84,7 @@ time.sleep(4); send('Reply with exactly the word PTYOK and nothing else.'); time
 r.append(step('model answered (assistant output)', expect(r'PTYOK(?!\s*and)', 150)))
 r.append(step('statusline names launched model', expect(r'●\s*' + re.escape(MODEL) + r'(?!\S)(?!\s*not loaded)', 40)))
 r.append(step('statusline shows proxy stats',  expect(r'tok/s|cache\s*\d+%', 40)))
-r.append(step('context gauge uses 120K window', expect(r'/12[01]K', 30)))
+r.append(step('context gauge uses the fitted window', expect(r'/1[12][0-9]K', 30)))
 send('/mcp'); time.sleep(1); send('\r')
 r.append(step('/mcp: websearch server connected', expect(r'websearch[^\n]{0,60}connected|connected[^\n]{0,60}websearch', 20)))
 send('\x1b'); time.sleep(0.5); send('\x1b'); time.sleep(0.5)

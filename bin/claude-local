@@ -16,7 +16,9 @@
 #                             (the env file maps each backend to its port: 1234 / 1244)
 #   CLAUDE_LOCAL_PROXY        1 = route through the usage proxy (default 1), 0 = direct
 #   CLAUDE_LOCAL_PROXY_PORT   first proxy port to try (default PORT+1; next free one is used)
-#   CLAUDE_LOCAL_MAX_OUTPUT   max output tokens per turn (default 8192; Claude's own default is 32000)
+#   CLAUDE_LOCAL_MAX_OUTPUT   max output tokens per turn (default 16384 since 2026-09-08, was 8192;
+#                             Claude's own default is 32000). A truncated Write of a large file fails
+#                             the turn; the extra 8K comes out of the autocompact budget (112640 at 128K).
 #   CLAUDE_LOCAL_AUTOCOMPACT  autocompact window in tokens
 #                             (default: server context - max output - 2048, floor 100000)
 #   CLAUDE_LOCAL_OFFLINE      1 = block all non-localhost network from Claude via a dead
@@ -79,7 +81,7 @@ BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"
 USE_PROXY="${CLAUDE_LOCAL_PROXY:-1}"
 PROXY_PORT="${CLAUDE_LOCAL_PROXY_PORT:-$((PORT + 1))}"
 PROMPT_MODE="${CLAUDE_LOCAL_PROMPT:-append}"
-MAX_OUTPUT="${CLAUDE_LOCAL_MAX_OUTPUT:-8192}"
+MAX_OUTPUT="${CLAUDE_LOCAL_MAX_OUTPUT:-16384}"
 TOOLS="${CLAUDE_LOCAL_TOOLS-Bash,Read,Edit,Write,Grep,Glob,Agent,WebFetch,TodoWrite,TaskCreate,TaskList,TaskUpdate,TaskGet,TaskStop,TaskOutput,ProposeGoal,ReportFindings}"
 DISALLOWED_TOOLS="${CLAUDE_LOCAL_DISALLOWED_TOOLS-}"
 OFFLINE="${CLAUDE_LOCAL_OFFLINE:-0}"
