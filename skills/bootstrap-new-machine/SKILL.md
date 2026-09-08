@@ -156,7 +156,7 @@ After bootstrap completes:
        --autocompact 120832 \
        --tools Bash,Read,Edit,Write,Grep,Glob
    ```
-   Compare against shipped default (21.4s/task mean, 94% cache hit).
+   Compare against the 2026-09-05 baseline with the same core allowlist (21.4s/task mean, 94% cache hit).
 
 ## Troubleshooting common bootstrap failures
 

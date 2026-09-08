@@ -110,7 +110,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     subgraph session["Per-session state (~/.claude-local/run/$$/]"]
-        R["session_start<br/>session_model<br/>context_max"]
+        R["session_start<br/>session_model<br/>context_max<br/>system_prompt.md (rendered)<br/>mcp.json"]
         U["usage.jsonl"]
         PP["proxy_port"]
         PL["proxy.log"]
@@ -118,7 +118,7 @@ flowchart TD
 
     subgraph config["~/.claude-local/"]
         E["env"]
-        SP["system_prompt.md (rendered)"]
+        SP["system_prompt.md (template)"]
         M["models/<model>.gguf"]
         SL["slots/<slot0.bin>"]
     end
@@ -127,6 +127,7 @@ flowchart TD
         LA["bin/claude-local"]
         PR["config/proxy.py"]
         PK["config/picker.py"]
+        WS["config/mcp-websearch.py"]
     end
 
     LA --> E

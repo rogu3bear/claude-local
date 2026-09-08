@@ -60,7 +60,7 @@ curl -sf http://localhost:$PORT/api/ps | jq '.models[].name'
 ### llama-server
 
 llama-server runs in router mode: the unit starts without a model and loads presets on demand,
-one resident at a time (`LLAMA_ARG_MODELS_MAX=1`; loading another evicts the least recently used).
+up to three resident (`LLAMA_ARG_MODELS_MAX=3`; a fourth load evicts the least recently used).
 The launcher does all of this; by hand:
 
 ```bash

@@ -16,6 +16,10 @@ flowchart TD
         P["proxy.py<br/>token logging +<br/>sampling override"]
     end
 
+    subgraph mcp["MCP (stdio)"]
+        WS["mcp-websearch.py<br/>DuckDuckGo search"]
+    end
+
     subgraph backend["Model Server"]
         O["Ollama 0.33.3<br/>Vulkan / ROCm"]
         LS["llama.cpp<br/>llama-server"]
@@ -29,9 +33,10 @@ flowchart TD
 
     U -->|"1. picks model, loads it"| O
     U -->|"2. starts proxy on free port"| P
-    U -->|"3. launches Claude Code<br/>--model qwen3.6:35b<br/>--autocompact 120832<br/>--tools Bash,Read,...<br/>ANTHROPIC_BASE_URL=http://proxy"| CC
+    U -->|"3. launches Claude Code<br/>--model qwen3.6:35b<br/>--autocompact 120832<br/>--tools Bash,Read,...<br/>--mcp-config websearch<br/>ANTHROPIC_BASE_URL=http://proxy"| CC
 
     CC -->|"4. /v1/messages<br/>streaming SSE"| P
+    CC -->|"web_search tool calls"| WS
     P -->|"5. forwards upstream<br/>logs usage to JSONL"| P
     P -->|"6. /v1/messages"| O
 
@@ -71,6 +76,7 @@ sequenceDiagram
 | **Statusline** | `config/statusline.sh` | Four-line cockpit showing uncached tokens, cache hit %, output throughput, and context gauge |
 | **Model Picker** | `config/picker.py` | Interactive menu of available models; non-interactive via `CLAUDE_LOCAL_MODEL` |
 | **Backend Adapter (Ollama)** | `config/backend-ollama.sh` | Ollama-specific: health check, model inventory, load/unload, context length probe |
+| **Web search (MCP)** | `config/mcp-websearch.py` | stdio MCP server exposing `web_search` (DuckDuckGo HTML); registered by the launcher, replaces the built-in WebSearch |
 | **Backend Adapter (llama-server)** | `config/backend-llamaserver.sh` | llama-server router mode: preset inventory with load state, `/models/load` + status polling, `/models/unload`, per-model props, slot save/restore (single-model layout still supported) |
 | **Model presets (llama-server)** | `~/.claude-local/llama-models.ini` | One section per GGUF: alias, file, reasoning, speculation, sampling; `bin/llama-models-ini` appends new files; `?reload=1` re-reads it |
 | **System Prompt** | `config/system_prompt.md` | Operator prompt templated with `{{MODEL}}`; appended to Claude's built-in prompt |
@@ -79,7 +85,8 @@ sequenceDiagram
 ## Key design decisions
 
 - **Isolated config directory** — `~/.claude-local/` is fully separate from `~/.claude/`. Your project-level Claude Code setup is never touched.
-- **Offline by default** — `CLAUDE_LOCAL_OFFLINE=1` (default) points `HTTPS_PROXY` at a dead port with localhost bypassed. Project CLAUDE.md files still load; everything else needs explicit opt-in (`CLAUDE_LOCAL_OFFLINE=0`).
+- **Offline on request** — `CLAUDE_LOCAL_OFFLINE=1` points `HTTPS_PROXY` at a dead port with localhost bypassed. Project CLAUDE.md files still load. Default 0 since 2026-09-07 so WebFetch and the web search MCP server work.
+- **Web search via MCP** — the built-in WebSearch is executed by Anthropic's API and returns nothing against a local server, so the launcher registers `config/mcp-websearch.py` (DuckDuckGo, stdio) with `--mcp-config`; `--tools` limits only the built-in set, MCP tools ride along.
 - **Autocompact fitted to server context** — Claude Code assumes 200K for unknown models. The launcher computes `autocompact = server_context - max_output(8192) - 2048` so prompt + generation always fit before compacting. Floor: 100K.
 - **Attribution header disabled** — `CLAUDE_CODE_ATTRIBUTION_HEADER=0` keeps the system prompt byte-identical across turns, preserving the server's prefix cache.
-- **Tool surface minimized** — default is `Bash,Read,Edit,Write,Grep,Glob`. The full tool list costs ~5K extra prompt tokens and wastes ~30% of turns on meta-tools (ReportFindings, TaskList, Skill).
+- **Tool surface chosen** — since 2026-09-07 the default is the core six plus Agent, WebFetch, the todo/task tools, ProposeGoal and ReportFindings (capability over speed); the benchmark keeps `Bash,Read,Edit,Write,Grep,Glob`, measured at ~5K fewer prompt tokens and ~30% fewer meta-tool turns.

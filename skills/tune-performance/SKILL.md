@@ -95,12 +95,16 @@ The statusline also shows context pressure (the gauge bar), thinking state, and 
 
 Edit `~/.claude-local/env` or set `CLAUDE_LOCAL_TOOLS`:
 ```bash
-# Lean default — removes meta-tool sink
+# Benchmark allowlist (the shipped default until 2026-09-07) — removes the meta-tool sink
 CLAUDE_LOCAL_TOOLS=Bash,Read,Edit,Write,Grep,Glob
 
-# Full list — only if you need Agent/ReportFindings/WebFetch etc.
-CLAUDE_LOCAL_TOOLS=Bash,Read,Edit,Write,Grep,Glob,Agent,WebFetch,WebSearch,TodoWrite,TaskCreate,TaskList,TaskUpdate,TaskGet,TaskStop,TaskOutput,ProposeGoal,ReportFindings
+# Shipped default since 2026-09-07 — capability over speed (Agent, WebFetch, task tools, ReportFindings)
+CLAUDE_LOCAL_TOOLS=Bash,Read,Edit,Write,Grep,Glob,Agent,WebFetch,TodoWrite,TaskCreate,TaskList,TaskUpdate,TaskGet,TaskStop,TaskOutput,ProposeGoal,ReportFindings
 ```
+
+Leave `WebSearch` out of any list: it is executed by Anthropic's API and returns nothing here. The
+launcher registers `config/mcp-websearch.py` as an MCP server instead (`mcp__websearch__web_search`,
+`CLAUDE_LOCAL_WEBSEARCH=1`), and `--tools` does not filter MCP tools.
 
 Measured impact: 49s → 21.4s mean wall/task on this hardware. The tool schemas cost ~5K prompt tokens and waste ~30% of turns.
 

@@ -71,6 +71,20 @@ Agent tool's type list as a mid-conversation `role: system` message; the usage p
 into the system prompt (`config/proxy.py`), which is why `CLAUDE_LOCAL_PROXY=0` breaks Qwen3.8
 whenever Agent is in `--tools`.
 
+### Switching models and searching the web
+
+Three ways to change model: the menu at start (`CLAUDE_LOCAL_MODEL=<preset>` skips it), `/model <preset>`
+inside the session (router mode loads an idle preset on the next request, up to `LLAMA_ARG_MODELS_MAX`
+resident; the statusline follows Claude's choice and shows `(was <launch model>)`), or (a)nother in the
+post-exit menu. Presets are the section names of `~/.claude-local/llama-models.ini`.
+
+Claude Code's built-in `WebSearch` is executed by Anthropic's API, so against a local server every call
+returns an empty result list (observed 2026-09-08). The launcher therefore leaves it out of `--tools` and
+registers `config/mcp-websearch.py` via `--mcp-config` instead: a dependency-free stdio MCP server that
+queries DuckDuckGo's HTML endpoint and shows up to the model as `mcp__websearch__web_search` (`--tools`
+only limits the built-in set; MCP tools ride along). `WebFetch` is client-side and works as is.
+`CLAUDE_LOCAL_WEBSEARCH=0` disables the server; `CLAUDE_LOCAL_OFFLINE=1` implies it.
+
 Measured 2026-09-07 (`bench/microbench.py`, cold prefill / decode at 2.7K, 10K and 30K prompt
 tokens, n_out 128, medians of 2; `bench/results/micro/micro-q38-{rocm,vulkan}.jsonl`):
 
@@ -151,7 +165,8 @@ Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29
 | `bin/claude-local` | launcher: server check, model picker, load, autocompact fit, prompt render, usage proxy, Claude launch, post-exit menu |
 | `config/backend-ollama.sh` | backend adapter (the function contract is documented in the file) |
 | `config/proxy.py` | streaming reverse proxy that logs per-turn usage (cache hit, tok/s, latency); optional sampling override; folds Claude Code's mid-conversation `role: system` message (Agent tool type list) into the system prompt, which Qwen3.8's chat template otherwise rejects with HTTP 500 |
-| `config/statusline.sh` | four-line cockpit fed by the proxy log; per-session state |
+| `config/statusline.sh` | four-line cockpit fed by the proxy log; per-session state; the model shown is the one Claude is using (follows `/model`) with its load state on the server |
+| `config/mcp-websearch.py` | stdio MCP server: `web_search` over DuckDuckGo HTML, replacing the built-in WebSearch that cannot run against a local server |
 | `config/picker.py` | model menu, or non-interactive via `CLAUDE_LOCAL_MODEL` |
 | `config/system_prompt.md` | operator prompt appended to Claude's built-in prompt (`{{MODEL}}` templated) |
 | `config/system_prompt_compact.md` | replacement prompt for `CLAUDE_LOCAL_PROMPT=replace`; faster, less careful |
@@ -159,7 +174,7 @@ Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29
 | `systemd/ollama.service` | generic unit template (no GPU or tuning env; those are drop-ins) |
 | `systemd/10-claude-local.conf` | drop-in: flash attention, 128K context, q8_0 KV, one slot, 2h keep-alive. Flash attention lives here because q8_0 KV silently falls back to f16 without it |
 | `systemd/20-gpu-*.conf` | GPU profile drop-ins; bootstrap installs the chosen one as `20-gpu.conf` |
-| `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=1`); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
+| `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=3`); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
 | `config/backend-llamaserver.sh` | llama-server adapter: router inventory with load state, load/unload via `/models/*` with status polling, per-model props, slot save/restore (single-model mode still supported) |
 | `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner, comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs); results in `bench/results` |
 | `test/` | smoke turn and pty-driven interactive session |
@@ -189,8 +204,9 @@ All env overrides are listed at the top of `bin/claude-local`.
 - settings.json `env` overrides the process environment, and `--settings` overrides settings.json;
   the proxy URL is passed via `--settings` for that reason.
 - Same-mode `--resume` is warm (21 uncached tokens). Changing prompt mode on resume re-sends the prompt once.
-- Isolation: `CLAUDE_LOCAL_OFFLINE=1` (default) points HTTPS_PROXY at a dead port with localhost bypassed.
-  Project-level CLAUDE.md files still load, by design.
+- Isolation: `CLAUDE_LOCAL_OFFLINE=1` points HTTPS_PROXY at a dead port with localhost bypassed.
+  Project-level CLAUDE.md files still load, by design. Default 0 since 2026-09-07 (WebFetch and the
+  web search MCP server need the internet); the 2026-09-05 measurements were taken offline.
 
 ## Backend measurements (2026-09-05, upstream llama.cpp 6a1a922d2 vs Ollama 0.33.3, same GGUF, q8_0 KV, flash attention, -b/-ub 2048)
 
@@ -224,7 +240,7 @@ Stack identity for every 2026-09-05 row (`bench/stack.sh`): kernel 7.0.0-31, fir
 | upstream HIP, same | all minus Agent | 27/27 | 154.3s | 75.6s | 12.8 | 230K |
 | Ollama Vulkan, 9 meta-tools denylisted | minus 9 | 27/27 | 26.1s | 23.8s | 7.9 | 98K |
 | upstream Vulkan, same | minus 9 | 26/27 | 187.7s | 107.9s | 15.2 | 347K |
-| **Ollama Vulkan, core allowlist (shipped default)** | Bash,Read,Edit,Write,Grep,Glob | 27/27 | **21.4s** | 20.8s | 8.5 | 50K |
+| **Ollama Vulkan, core allowlist (benchmark default; shipped default until 2026-09-07)** | Bash,Read,Edit,Write,Grep,Glob | 27/27 | **21.4s** | 20.8s | 8.5 | 50K |
 | upstream Vulkan, core allowlist | same | 27/27 | 39.5s | 36.4s | 13.9 | 99K |
 | upstream Vulkan rebuilt with LunarG glslc, core allowlist | same | 27/27 | 40.3s | 33.4s | 14.4 | 102K |
 

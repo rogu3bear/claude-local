@@ -84,8 +84,8 @@ Apply an edit without a restart: `curl -s 'http://127.0.0.1:1244/models?reload=1
 model whose section changed is unloaded). New GGUF under `~/.claude-local/models`: run
 `llama-models-ini`, which appends a section per missing file and reloads the router. Precedence
 per instance: CLI args (`LLAMA_EXTRA_ARGS`, wrapper flags) > model section > `[*]` > environment
-(the unit drop-in). Server-wide tuning stays in the drop-in; `LLAMA_ARG_MODELS_MAX=1` there keeps
-one model resident (loading another evicts the least recently used).
+(the unit drop-in). Server-wide tuning stays in the drop-in; `LLAMA_ARG_MODELS_MAX=3` there keeps
+up to three models resident (a fourth load evicts the least recently used).
 
 ### Ollama env vars (set in systemd drop-in or environment)
 

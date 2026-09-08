@@ -6,8 +6,8 @@
 # Router mode (default since 2026-09-07): the server starts without a model and every
 # INI section is a model it loads on demand. /models lists them with a status
 # (unloaded | loading | loaded, plus failed:true), /models/load and /models/unload
-# switch, and one model is resident at a time (LLAMA_ARG_MODELS_MAX=1 in the drop-in:
-# loading another evicts the least recently used). POST requests name the model in
+# switch, and up to LLAMA_ARG_MODELS_MAX models stay resident (3 in the drop-in;
+# one more load evicts the least recently used). POST requests name the model in
 # the JSON body, GET endpoints in ?model=. The pre-router single-model layout
 # (LLAMA_ARG_MODEL in the env file) still works: /models has no status field there
 # and the request's model field is ignored.
@@ -100,9 +100,10 @@ _ls_slot_save() { # $1 = model: persist slot 0's prompt cache under the model's 
   printf '%s' "$out" | jq -r '"[local] prompt cache saved for '"$1"': \(.n_saved // .n_tokens // "?") tokens, \(((.n_written // 0)/1e6|floor)) MB, \(.timings.save_ms // .t_ms // "?") ms"' 2>/dev/null >&2 || true
 }
 
-# Load (router: via /models/load, waiting for status=loaded; a different resident model
-# has its prompt cache saved first, then the router evicts it) and restore this model's
-# saved prompt cache if one exists (warm first turn).
+# Load (router: via /models/load, waiting for status=loaded; every other resident model
+# has its prompt cache saved first, so whichever one the router evicts once
+# LLAMA_ARG_MODELS_MAX is reached restarts warm) and restore this model's saved prompt
+# cache if one exists (warm first turn).
 backend_load() {
   local m=$1 st i f rc other alias
   if _ls_router; then
