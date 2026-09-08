@@ -6,6 +6,7 @@
 #   ~/.local/bin/llama-server-run  -> bin/llama-server-run  (ExecStart of llama-server.service)
 #   ~/.local/bin/llama-models-ini  -> bin/llama-models-ini  (append new GGUFs to the router INI)
 #   ~/.claude-local/bench          -> bench/
+#   ~/.claude-local/skills         -> skills/   (Claude Code reads them only when Skill is in CLAUDE_LOCAL_TOOLS)
 #   ~/.config/systemd/user/ollama.service.d/10-claude-local.conf   (copied if changed)
 #   ~/.config/systemd/user/ollama.service.d/20-gpu.conf            (copied from systemd/20-gpu-$GPU.conf if GPU given)
 # Existing regular files are moved aside as <name>.pre-install. Re-runnable.
@@ -26,12 +27,14 @@ mkdir -p "$BIN" "$CONFIG"
 link "$HERE/bin/claude-local" "$BIN/claude-local"
 link "$HERE/bin/llama-server-run" "$BIN/llama-server-run"
 link "$HERE/bin/llama-models-ini" "$BIN/llama-models-ini"
-for f in backend-ollama.sh backend-llamaserver.sh picker.py proxy.py mcp-websearch.py statusline.sh system_prompt.md system_prompt_compact.md settings.json; do
+for f in backend-ollama.sh backend-llamaserver.sh picker.py proxy.py mcp-websearch.py hook-urlguard.py statusline.sh system_prompt.md system_prompt_compact.md settings.json; do
   link "$HERE/config/$f" "$CONFIG/$f"
 done
 link "$HERE/bench" "$CONFIG/bench"
+link "$HERE/skills" "$CONFIG/skills"     # loaded by Claude Code only when Skill is in CLAUDE_LOCAL_TOOLS
 if [ -x "$HOME/.local/ollama/bin/ollama" ] && [ ! -e "$BIN/ollama" -o -L "$BIN/ollama" -o -f "$BIN/ollama" ]; then
-  if [ ! -f "$BIN/ollama" ] || grep -q 'claude-local ollama wrapper' "$BIN/ollama" 2>/dev/null; then
+  # Rewrite our own wrapper (any vintage: the marker line, or the user-local binary path); never a foreign script.
+  if [ ! -f "$BIN/ollama" ] || grep -qE 'claude-local ollama wrapper|\.local/ollama/bin/ollama' "$BIN/ollama" 2>/dev/null; then
     cat > "$BIN/ollama" <<'WRAP'
 #!/usr/bin/env bash
 # claude-local ollama wrapper: talk to the user-local server on its configured port.
@@ -63,7 +66,7 @@ if systemctl --user cat llama-server.service >/dev/null 2>&1; then
   fi
 fi
 if [ "$CONFIG" != "$HOME/.claude-local" ]; then
-  echo "note: set statusLine.command in $CONFIG/settings.json to $CONFIG/statusline.sh" >&2
+  echo "note: set statusLine.command in $CONFIG/settings.json to $CONFIG/statusline.sh and the hooks.PreToolUse command to $CONFIG/hook-urlguard.py" >&2
 fi
 [ "$changed" = 1 ] && echo "DROPIN_CHANGED"
 echo "done. try: claude-local" >&2

@@ -68,7 +68,7 @@ backend_models_json() {
       jq -cn --arg n "$n" --arg p "$p" --argjson s "$s" '{name:$n, path:$p, size:$s}'
     done | jq -s '{models: [.[] | {name, size, details: {
         parameter_size: ((.path | try capture("(?<p>[0-9]+(\\.[0-9]+)?B)(?![A-Za-z])") | .p) // ""),
-        quantization_level: ((.path | split("/") | last | try capture("(?<q>(UD-)?(I?Q[0-9](_[A-Z0-9]+)*|BF16|F16|F32))") | .q) // "") }}]}' > "$1" 2>/dev/null \
+        quantization_level: ((.path | split("/") | last | try capture("(?<q>(UD-)?(I?Q[0-9](_[A-Z0-9]+)*|NVFP4|MXFP4|BF16|F16|F32))") | .q) // "") }}]}' > "$1" 2>/dev/null \
       || echo '{"models":[]}' > "$1"
   else
     printf '%s' "$raw" | jq '{models: [.data[] | {

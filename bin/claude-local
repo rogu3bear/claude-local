@@ -41,6 +41,9 @@
 #   CLAUDE_LOCAL_DISALLOWED_TOOLS  extra comma list passed as --disallowedTools (default none)
 #   CLAUDE_LOCAL_SAMPLING     JSON sampling override applied by the proxy to every request,
 #                             e.g. '{"temperature":0.7,"top_p":0.8,"top_k":20}' (default: none)
+#   CLAUDE_LOCAL_URLGUARD     1 = the PreToolUse hook config/hook-urlguard.py denies WebFetch on a
+#                             URL that never appeared in a user message, search result or tool
+#                             output (default 1); 0 = fetch anything
 #   CLAUDE_LOCAL_PROXY_DEBUG  1 = proxy also logs request params/tool count/system size
 #
 # Switching models: pick one in the menu at start, type `/model <preset>` mid-session
@@ -250,6 +253,7 @@ export CLAUDE_LOCAL_BACKEND="$BACKEND"
 export CLAUDE_LOCAL_TOOLS="${TOOLS}"
 export CLAUDE_LOCAL_OFFLINE="$OFFLINE"
 export CLAUDE_LOCAL_WEBSEARCH="$WEBSEARCH"
+export CLAUDE_LOCAL_URLGUARD="${CLAUDE_LOCAL_URLGUARD:-1}"
 export CLAUDE_LOCAL_SNAPSHOT="$SNAPSHOT"
 export ANTHROPIC_BASE_URL="$CLAUDE_BASE_URL"
 export ANTHROPIC_AUTH_TOKEN="$AUTH_TOKEN"

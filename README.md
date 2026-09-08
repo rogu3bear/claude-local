@@ -14,6 +14,7 @@ backed by a benchmark number.
     make check              # lint + one smoke turn through launcher and proxy
     make check-interactive  # pty-driven full session (picker, statusline, Ctrl-C, exit menu)
     make bench LABEL=x      # benchmark a configuration; make compare to read results
+    make bench-shipped      # benchmark exactly what ships: default tool list, web search MCP, online
 
 ## Backends
 
@@ -84,6 +85,12 @@ registers `config/mcp-websearch.py` via `--mcp-config` instead: a dependency-fre
 queries DuckDuckGo's HTML endpoint and shows up to the model as `mcp__websearch__web_search` (`--tools`
 only limits the built-in set; MCP tools ride along). `WebFetch` is client-side and works as is.
 `CLAUDE_LOCAL_WEBSEARCH=0` disables the server; `CLAUDE_LOCAL_OFFLINE=1` implies it.
+
+A small model also invents URLs (five non-existent GitHub repos fetched in one session). The isolated
+settings pre-allow `WebFetch` so browsing never prompts, and a PreToolUse hook (`config/hook-urlguard.py`)
+denies any fetch whose URL, or a parent path of it, has not already appeared in a user message, a
+search result or a tool output. The denial tells the model to search first. `CLAUDE_LOCAL_URLGUARD=0`
+turns the guard off.
 
 Measured 2026-09-07 (`bench/microbench.py`, cold prefill / decode at 2.7K, 10K and 30K prompt
 tokens, n_out 128, medians of 2; `bench/results/micro/micro-q38-{rocm,vulkan}.jsonl`):
@@ -167,6 +174,8 @@ Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29
 | `config/proxy.py` | streaming reverse proxy that logs per-turn usage (cache hit, tok/s, latency); optional sampling override; folds Claude Code's mid-conversation `role: system` message (Agent tool type list) into the system prompt, which Qwen3.8's chat template otherwise rejects with HTTP 500 |
 | `config/statusline.sh` | four-line cockpit fed by the proxy log; per-session state; the model shown is the one Claude is using (follows `/model`) with its load state on the server |
 | `config/mcp-websearch.py` | stdio MCP server: `web_search` over DuckDuckGo HTML, replacing the built-in WebSearch that cannot run against a local server |
+| `config/hook-urlguard.py` | PreToolUse hook: denies WebFetch on a URL the conversation has never shown the model |
+| `config/settings.json` | the isolated Claude Code settings: statusline, hook, pre-allowed WebFetch and web search, and an `env` block that keeps a bare `claude` run with this config dir on the local llama-server port instead of Anthropic's API |
 | `config/picker.py` | model menu, or non-interactive via `CLAUDE_LOCAL_MODEL` |
 | `config/system_prompt.md` | operator prompt appended to Claude's built-in prompt (`{{MODEL}}` templated) |
 | `config/system_prompt_compact.md` | replacement prompt for `CLAUDE_LOCAL_PROMPT=replace`; faster, less careful |
@@ -177,6 +186,7 @@ Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29
 | `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=3`); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
 | `config/backend-llamaserver.sh` | llama-server adapter: router inventory with load state, load/unload via `/models/*` with status polling, per-model props, slot save/restore (single-model mode still supported) |
 | `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner, comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs); results in `bench/results` |
+| `skills/` | operator skills (configure/diagnose backend, manage models, tune, bench, bootstrap); linked into `~/.claude-local/skills` but only loaded when `Skill` is added to `CLAUDE_LOCAL_TOOLS`, which the 2026-09-05 measurements found to be a turn sink |
 | `test/` | smoke turn and pty-driven interactive session |
 
 All env overrides are listed at the top of `bin/claude-local`.
@@ -202,7 +212,9 @@ All env overrides are listed at the top of `bin/claude-local`.
 - Claude assumes a 200K window for unknown models; the launcher sets autocompact to
   server context - max output (8192) - 2048 so prompt + generation always fit, and the statusline gauge uses that.
 - settings.json `env` overrides the process environment, and `--settings` overrides settings.json;
-  the proxy URL is passed via `--settings` for that reason.
+  the proxy URL is passed via `--settings` for that reason. The `env` block pins the llama-server port
+  (1244), so `CLAUDE_CONFIG_DIR=~/.claude-local claude` without the launcher talks to that server or
+  fails with a connection error; it never reaches Anthropic's API. Ollama users go through the launcher.
 - Same-mode `--resume` is warm (21 uncached tokens). Changing prompt mode on resume re-sends the prompt once.
 - Isolation: `CLAUDE_LOCAL_OFFLINE=1` points HTTPS_PROXY at a dead port with localhost bypassed.
   Project-level CLAUDE.md files still load, by design. Default 0 since 2026-09-07 (WebFetch and the

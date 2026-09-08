@@ -3,8 +3,9 @@
 
 Creates a throwaway git repo, pre-accepts Claude's workspace-trust dialog for
 it in the isolated config, then walks a real session: picker -> model by name
--> TUI ready -> one prompt answered -> statusline shows proxy stats and the
-120K-window gauge -> double Ctrl-C -> wrapper's post-exit menu -> clean exit.
+-> banner says websearch=1 -> TUI ready -> one prompt answered -> statusline names
+the launched model and shows proxy stats and the 120K-window gauge -> /mcp lists the
+websearch server as connected -> double Ctrl-C -> wrapper's post-exit menu -> clean exit.
 
     test/interactive.py [MODEL]          (default: CLAUDE_LOCAL_MODEL, else the loaded/first llama-server preset, else qwen3-coder:30b)
 
@@ -75,13 +76,18 @@ mm = re.search(r'(\d+)\)\s+\[\w+\s*\]\s+' + re.escape(MODEL) + r'\s', seen_text)
 num = mm.group(1) if mm else '1'
 print(f"      picking entry {num} ({MODEL})"); send(num + '\n')
 r.append(step('model accepted + claude start', expect(r'Starting Claude Code: model=' + re.escape(MODEL) + r' ', 60)))
+r.append(step('banner: web search MCP on',      expect(r'websearch=1', 10)))
 if expect(r'trust\s*this\s*folder', 30):
     send('\x1b[B'); send('\r'); print('      accepted workspace trust dialog')
 r.append(step('claude TUI ready',              expect(r'manual\s*mode|for\s*agents|/effort|shortcuts', 120)))
 time.sleep(4); send('Reply with exactly the word PTYOK and nothing else.'); time.sleep(1); send('\r')
 r.append(step('model answered (assistant output)', expect(r'PTYOK(?!\s*and)', 150)))
+r.append(step('statusline names launched model', expect(r'●\s*' + re.escape(MODEL) + r'(?!\S)(?!\s*not loaded)', 40)))
 r.append(step('statusline shows proxy stats',  expect(r'tok/s|cache\s*\d+%', 40)))
 r.append(step('context gauge uses 120K window', expect(r'/12[01]K', 30)))
+send('/mcp'); time.sleep(1); send('\r')
+r.append(step('/mcp: websearch server connected', expect(r'websearch[^\n]{0,60}connected|connected[^\n]{0,60}websearch', 20)))
+send('\x1b'); time.sleep(0.5); send('\x1b'); time.sleep(0.5)
 send('\x03'); r.append(step('first Ctrl-C prompts',        expect(r'Ctrl-C\s*again|again\s*to\s*exit', 10)))
 send('\x03'); r.append(step('wrapper survives: post-exit menu', expect(r'models in memory', 30))); send('\r')
 r.append(step('leave loaded',                  expect(r'Leaving', 10)))

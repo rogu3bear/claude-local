@@ -1,6 +1,6 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:1234",
+    "ANTHROPIC_BASE_URL": "http://localhost:1244",
     "ANTHROPIC_AUTH_TOKEN": "local",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"
@@ -13,7 +13,22 @@
   },
   "permissions": {
     "allow": [
-      "mcp__websearch__web_search"
+      "mcp__websearch__web_search",
+      "WebFetch"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude-local/hook-urlguard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
