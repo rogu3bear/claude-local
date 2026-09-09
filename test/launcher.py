@@ -134,6 +134,16 @@ r2, argv2, _ = run(["--permission-mode", "plan", "-p", "hi"], "caller mode")
 check(argv2.count("--permission-mode") == 1 and argv2[argv2.index("--permission-mode") + 1] == "plan", "a caller-supplied --permission-mode is passed once, unchanged")
 r3, argv3, _ = run(["--dangerously-skip-permissions", "-p", "hi"], "skip perms")
 check("--permission-mode" not in argv3 and "--dangerously-skip-permissions" in argv3, "--dangerously-skip-permissions suppresses the launcher's mode")
+# the picker's default: CLAUDE_LOCAL_DEFAULT_MODEL is listed first and Enter selects it
+inv = os.path.join(tmp, "inv.json")
+open(inv, "w").write(json.dumps({"models": [{"name": "alpha", "size": 1}, {"name": "beta-default", "size": 2}]}))
+penv = dict(os.environ, MODELS_JSON_PATH=inv, LOADED_MODELS="alpha", CLAUDE_LOCAL_MODEL="", CLAUDE_LOCAL_DEFAULT_MODEL="beta-default")
+r = subprocess.run([sys.executable, os.path.join(REPO, "config", "picker.py")], input="\n", capture_output=True, text=True, env=penv)
+first = next((l for l in r.stderr.splitlines() if l.strip().startswith("1)")), "")
+check(r.stdout.strip() == "LOAD|beta-default" and "beta-default" in first and "default" in first,
+      f"picker lists the default model first and Enter picks it ({r.stdout.strip()!r}; line 1: {first.strip()[:70]!r})")
+r = subprocess.run([sys.executable, os.path.join(REPO, "config", "picker.py")], input="2\n", capture_output=True, text=True, env=penv)
+check(r.stdout.strip() == "USE|alpha", f"a number still picks by position after the reorder ({r.stdout.strip()!r})")
 stub.terminate()
 if fails:
     print(f"LAUNCHER FAIL ({len(fails)}): {fails}; artifacts in {tmp}"); sys.exit(1)

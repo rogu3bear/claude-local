@@ -9,25 +9,29 @@ git clone https://github.com/rogu3bear/claude-local ~/dev/claude-local && \
 
 ## Recommended on Strix Halo
 
-On the Ryzen AI MAX+ 395 (gfx1151) the winner of the 2026-09-06 overnight bench is llama-server
-with the Qwen3.6-35B-A3B MTP quant: 27/27 tasks, 12.3 s/task mean, against 21.4 s for Ollama with
-qwen3-coder:30b on the same core tool allowlist. Bootstrap downloads the GGUF itself:
+On the Ryzen AI MAX+ 395 (gfx1151) the recommended setup is llama-server with the uncensored
+Genesis build of Qwen3.6-35B-A3B (jan1k, abliterated; NVFP4 with the MTP head), the preset this
+host runs. Bootstrap downloads the GGUF itself:
 
 ```bash
 cd ~/dev/claude-local && ./bootstrap.sh --backend llamaserver \
-  --hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
-  --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 \
-  --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+  --hf jan1k/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-NVFP4-GGUF/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-MTP-NVFP4.gguf \
+  --sha256 af80d3ef030268c46d56f6d7d2722de67fe81592708bac6c8fa381461adfbaad
 ```
 
 - Needs a built `~/ai/llama.cpp` (`--llama-cpp DIR`); bootstrap prints the build recipe and stops
   when the binary is missing.
-- URL, size (22853663008 bytes) and sha256 were verified against huggingface.co on 2026-09-08.
-- `--model-gguf` names the download. unsloth's non-MTP repo (`unsloth/Qwen3.6-35B-A3B-GGUF`) ships
-  a different file under the same name (22360456160 bytes, another hash), and the `[qwen3.6-35b]`
-  preset in `config/llama-models.ini.example` (reasoning off, `draft-mtp` n-max 2, the winning
-  configuration) expects the `-MTP` name. Without `--model-gguf` the file lands under its remote
-  name and gets a bare preset (`qwen3.6-35b-a3b-ud-q4_k_xl`, sampling from `[*]` only).
+- URL, size (22170261312 bytes) and sha256 were verified against huggingface.co on 2026-09-09. The
+  file keeps its remote name, which the `[qwen3.6-35b-genesis]` preset in
+  `config/llama-models.ini.example` (reasoning off, `draft-mtp` n-max 2) expects, so no `--model-gguf`.
+- The filtered original, the 2026-09-06 overnight winner (27/27, 12.3 s/task against 21.4 s for
+  Ollama with qwen3-coder:30b on the same core tool allowlist), is
+  `unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` (sha256 `55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1`,
+  22853663008 bytes). Pass it with `--model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf`:
+  the `[qwen3.6-35b]` preset expects the `-MTP` name, and unsloth's non-MTP repo
+  (`unsloth/Qwen3.6-35B-A3B-GGUF`) ships a different file under the remote name (22360456160 bytes,
+  another hash). Without `--model-gguf` the file lands under its remote name and gets a bare preset
+  (`qwen3.6-35b-a3b-ud-q4_k_xl`, sampling from `[*]` only).
 - The device is auto-detected (ROCm0 on this host, see below). Ollama stays installed as the
   fallback backend: `CLAUDE_LOCAL_BACKEND=ollama claude-local`.
 

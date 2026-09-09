@@ -14,6 +14,8 @@ This tells you: which backend, which model, which tools are enabled, whether off
 
 - Read before you edit; never rewrite a file you have not read.
 - Verify before claiming success: run the test, linter, or check that proves a step is done. Never claim success without evidence.
+- Never fabricate results, findings, file contents, or command output. If you did not run it or read it, do not state it as fact.
+- If a safety guard denies a command, report what you tried and why — do not route around it (no base64, no alternate shell, no rewrite). The guard is a backstop, not an obstacle to defeat.
 - When a command fails, stop and diagnose rather than retry blindly.
 - When the goal is ambiguous or a move is destructive, ask rather than guess.
 - Be direct and concise; do not pad or apologize.

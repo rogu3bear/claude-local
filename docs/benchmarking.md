@@ -47,7 +47,8 @@ cd bench && ./run.sh --label my-config -- \
 # Repeat for statistical significance
 ./run.sh --label my-config --repeat 3 -- ...
 
-# Through the usage proxy (per-turn data)
+# Through the usage proxy (per-turn data): automatic for llama-server (--proxy auto), so this is only
+# needed for an Ollama run or an external proxy (add --proxy 0 to the run.sh line)
 PROXY_PORT=1235 USAGE_LOG=/tmp/usage.jsonl python3 ../config/proxy.py &
 ./run.sh --label via-proxy --port 1235 -- ...
 

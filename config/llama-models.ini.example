@@ -16,6 +16,15 @@ top-k = 20
 min-p = 0
 presence-penalty = 1.5
 
+; Qwen3.6-35B-A3B Uncensored Genesis (jan1k: abliterated, NVFP4, MTP head embedded), the preset
+; this host runs and the one bootstrap's recommended command downloads (size and sha256 verified
+; against huggingface.co on 2026-09-09). Same keys as [qwen3.6-35b]: non-thinking, draft-mtp n-max 2.
+[qwen3.6-35b-genesis]
+model = __HOME__/.claude-local/models/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-MTP-NVFP4.gguf
+reasoning = off
+spec-type = draft-mtp
+spec-draft-n-max = 2
+
 ; Qwen3.8-27B (dense, thinking, MTP head embedded in every unsloth quant). unsloth/Qwen3.8-27B-GGUF.
 ; draft-mtp with n-max 4 measured 2026-09-07: decode 7.7 -> 19.2 tok/s (Q8_0), 9.4 -> 25.1 (Q6_K)
 ; at 2.7K prompt, ~17-18 for every quant at 10K; n-max 2 = 16.6, n-max 8 = 18.2, ngram-mod = 8.1.

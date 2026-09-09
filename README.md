@@ -10,14 +10,14 @@ backed by a benchmark number.
                             # Idempotent (no server restart unless the drop-in env changed); --dry-run shows the plan; no sudo.
                             # The port is persisted in ~/.claude-local/env; `ollama` on PATH is a wrapper that targets it.
     ./bootstrap.sh --backend llamaserver \
-      --hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
-      --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 \
-      --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
-                            # recommended on Strix Halo: llama-server with the 2026-09-06 overnight winner. --hf downloads
-                            # the GGUF (23GB; resumable, size, magic and sha256 checked, skipped when present) and skips the
-                            # Ollama pull; --device auto (default) takes ROCm0 when build-hip lists it, else Vulkan0;
-                            # --model-gguf names the file because the [qwen3.6-35b] preset expects the -MTP name the
-                            # remote file lacks. URL, size and hash verified against huggingface.co on 2026-09-08.
+      --hf jan1k/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-NVFP4-GGUF/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-MTP-NVFP4.gguf \
+      --sha256 af80d3ef030268c46d56f6d7d2722de67fe81592708bac6c8fa381461adfbaad
+                            # recommended on Strix Halo: llama-server with the uncensored Genesis build of Qwen3.6-35B-A3B
+                            # (jan1k, abliterated; NVFP4 with the MTP head), the preset this host runs. --hf downloads the
+                            # GGUF (22GB; resumable, size, magic and sha256 checked, skipped when present) and skips the
+                            # Ollama pull; --device auto (default) takes ROCm0 when build-hip lists it, else Vulkan0. URL,
+                            # size and hash verified against huggingface.co on 2026-09-09. The filtered unsloth original,
+                            # the 2026-09-06 overnight winner, and its command are in docs/bootstrap.md.
     make install            # symlinks only (already-bootstrapped machine)
     claude-local            # pick a model, go
     make test               # offline tests: proxy events, hook and URL guards, drain, the launcher itself (fake claude); no server, ~15 s
@@ -83,6 +83,7 @@ the cache, so a fresh session starts warm even after a server restart. The pre-r
 | alias | file | what | per-model keys |
 |---|---|---|---|
 | `qwen3.6-35b` | Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL (22.9GB) | MoE, 3B active, MTP head embedded | `reasoning = off`, `spec-type = draft-mtp`, `spec-draft-n-max = 2` (the 2026-09-06 overnight winner) |
+| `qwen3.6-35b-genesis` | Qwen3.6-35B-A3B-Uncensored-Genesis-Final-MTP-NVFP4 (22.2GB) | the same MoE with refusals removed (jan1k, abliterated), NVFP4, MTP head; the preset this host runs and bootstrap's recommended download | same keys as `qwen3.6-35b`; task bench `genesis-core` 2026-09-09: 9/9, 12.3 s/task, 6.4 turns, cache 89%, the same numbers as the filtered file (Measured claims) |
 | `qwen3.8-27b` | Qwen3.8-27B-Q8_0 (29.0GB) | dense, thinking, MTP head embedded; reference quant | `reasoning = on`, `spec-type = draft-mtp`, `spec-draft-n-max = 4` |
 | `qwen3.8-27b-q6kxl` | Qwen3.8-27B-UD-Q6_K_XL (25.3GB) | same model, Unsloth dynamic Q6 | same |
 | `qwen3.8-27b-q6k` | Qwen3.8-27B-UD-Q6_K (22.0GB) | same model, smallest | same |
@@ -92,14 +93,18 @@ sits in the INI's `[*]` section; `LLAMA_EXTRA_ARGS` is empty in router mode beca
 beat preset keys for every instance. Section names must not contain a colon: the preset parser
 canonicalises whatever follows one as a quant tag (`qwen3.8:27b-q6k` would list as `qwen3.8:Q6K`).
 
-Qwen3.8's chat template raises on a system message that is not first, and Claude Code sends the
-Agent tool's type list as a mid-conversation `role: system` message; the usage proxy folds it
-into the system prompt (`config/proxy.py`), which is why `CLAUDE_LOCAL_PROXY=0` breaks Qwen3.8
-whenever Agent is in `--tools`.
+Qwen3.8's chat template raises on a system message that is not first, and so does the Genesis build of
+Qwen3.6 (an older Qwen3.6 template; the unsloth file merges leading system messages and ignores the rest).
+Claude Code sends the Agent tool's type list as a mid-conversation `role: system` message and, unless
+`CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off`, its `<total_tokens>` reminder; the usage proxy folds them
+into the system prompt (`config/proxy.py`), which is why `CLAUDE_LOCAL_PROXY=0` breaks Qwen3.8 whenever Agent is
+in `--tools` and breaks Genesis on every turn (the bench runner starts its own proxy for llama-server since 2026-09-09).
 
 ### Switching models and searching the web
 
-Three ways to change model: the menu at start (`CLAUDE_LOCAL_MODEL=<preset>` skips it), `/model <preset>`
+Three ways to change model: the menu at start (`CLAUDE_LOCAL_MODEL=<preset>` skips it; the model named by
+`CLAUDE_LOCAL_DEFAULT_MODEL` in `~/.claude-local/env`, written by bootstrap, is listed first and Enter picks it:
+`qwen3.6-35b-genesis` on this host), `/model <preset>`
 inside the session (router mode loads an idle preset on the next request, up to `LLAMA_ARG_MODELS_MAX`
 resident; the statusline follows Claude's choice and shows `(was <launch model>)`), or (a)nother in the
 post-exit menu. Presets are the section names of `~/.claude-local/llama-models.ini`.
@@ -150,7 +155,7 @@ interleaving with its parent or a prefix that changed.
 
 **The 0% cache of 2026-09-08, and its fix.** Claude Code (2.1.265) appends a `role: system` message
 `<total_tokens>N tokens left</total_tokens>` to every request after the first, with a new number each turn and
-the old ones kept. The proxy's fold moved it into the system prompt, so on a hybrid model every turn
+the old ones kept (in print mode, `claude -p`, it is in the first request too: verified 2026-09-09 against the stub). The proxy's fold moved it into the system prompt, so on a hybrid model every turn
 re-prefilled the tool schemas and the whole conversation (12K-30K tokens, 15-40 s; the server log shows
 `selected slot by LCP similarity, f_sim_best = 0.45`). The proxy now drops that block wherever it appears
 (`strip_volatile`: in a `role: system` entry, a user text block or a plain-string user message alike), the launcher sets `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off` so it is not sent at all, and
@@ -371,7 +376,7 @@ Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29
 | `systemd/20-gpu-*.conf` | GPU profile drop-ins; bootstrap installs the chosen one as `20-gpu.conf` |
 | `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=2` and a 16 GB RAM prompt cache per instance); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
 | `config/backend-llamaserver.sh` | llama-server adapter: router inventory with load state, load/unload via `/models/*` with status polling, per-model props, slot save/restore (single-model mode still supported) |
-| `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner (`run.sh`, which deletes its scratch repo's transcript dir after each run), comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs), `stack.sh` (one-line stack identity per row: kernel, firmware, Mesa, the glslc that built the Vulkan backend, `_q8_1` shader count, llama.cpp, Ollama, ROCm); results in `bench/results`, mostly local only (see above) |
+| `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner (`run.sh`: behind the usage proxy for llama-server, registered as a live session for the drain timer, deletes its scratch repo's transcript dir after each run), comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs), `stack.sh` (one-line stack identity per row: kernel, firmware, Mesa, the glslc that built the Vulkan backend, `_q8_1` shader count, llama.cpp, Ollama, ROCm); results in `bench/results`, mostly local only (see above) |
 | `skills/` | operator skills (configure/diagnose backend, manage models, tune, bench, bootstrap); linked into `~/.claude-local/skills` but only loaded when `Skill` is added to `CLAUDE_LOCAL_TOOLS`, which the 2026-09-05 measurements found to be a turn sink |
 | `test/` | smoke turn, pty-driven interactive session, checkpoint/resume and idle-unload tests; offline: proxy events, hook and URL guards, drain, prefix stability, guard under each permission mode, and the launcher itself (`test/launcher.py`: a fake `claude` on PATH records what it is started with and sends one `claude-*` turn through the launcher-started proxy), all against `test/stub_upstream.py`; the tests delete the transcript dirs they leave |
 | `scripts/contracts/check_no_ai_attribution.sh` | commit-message contract: no commit may credit an AI tool as an author (`Co-Authored-By: Claude\|GPT\|Copilot\|...`, `Claude-Session:`, `Generated with [Claude Code]`, session links). `--message-file FILE` is what `.githooks/commit-msg` runs (active only in a clone that set `git config core.hooksPath .githooks`); `--log [RANGE]` walks the history (default all of it) and is part of `make lint`, hence of `make test` and every `make check*`; exit 1 on a hit, 2 on usage |
@@ -391,6 +396,15 @@ All env overrides are listed at the top of `bin/claude-local`.
 | Q8 weights | 8 | 88% | 35.9s | 98% |
 
 Mesa 26.2.2 gate (2026-09-08, label mesa262-ollama, 9 tasks x 1): 9/9, mean wall 27.8s, cache 96% versus fb-ollama-vk-core's 27/27, 21.4s, 95% on Mesa 25.2.8 (27 runs, the operator prompt also changed on 2026-09-08). Pass and cache rates are unchanged; the 6s higher mean comes from the first task, which included the model load (58s vs 23s), and one 18-turn run of 08-cli-flag (43s vs 18s) under a longer prompt (74K vs 50K prompt tokens per run), while the other seven tasks landed within 4s of the reference. Nothing here points at the driver, but a single repetition cannot separate Mesa from the prompt change.
+
+Genesis, the uncensored build this host runs (2026-09-09, label `genesis-core`, 9 tasks x 1, ROCm0, through the runner's
+proxy): 9/9, mean wall 12.3s, 6.4 turns/task, cache 89%, the same numbers as the filtered `q36-mtp2-core` winner (12.3s,
+6.4, 88% over 27 runs); the abliteration costs nothing on this bench. The first attempt ran direct to the router and
+scored 0/4 at 180s per task: the Genesis GGUF carries an older Qwen3.6 template that raises "System message must be at
+the beginning" on the `<total_tokens>` reminder Claude Code 2.1.266 puts inside `messages`, and in print mode it does so
+on the very first request. The bench runner now runs behind the usage proxy for llama-server (`--proxy`, the fold), sets
+`CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off` like the launcher, and registers itself as a live session so the drain timer,
+which was unloading the model every two minutes during that attempt, leaves it alone.
 
 - `--exclude-dynamic-system-prompt-sections` is the single biggest win: git status leaves the
   system prompt, so editing files no longer re-renders it and busts the server's prefix cache

@@ -22,16 +22,15 @@ This is a single command that goes from a fresh Linux user account to a working 
 
 ### Recommended on this machine (Strix Halo, gfx1151)
 
-llama-server with the Qwen3.6-35B-A3B MTP quant won the 2026-09-06 overnight bench: 27/27 tasks, 12.3 s/task mean, against 21.4 s for Ollama with qwen3-coder:30b on the same core tool allowlist. Needs the llama.cpp build below.
+llama-server with the uncensored Genesis build of Qwen3.6-35B-A3B (jan1k, abliterated; NVFP4 with the MTP head) is the preset this host runs; the filtered unsloth original won the 2026-09-06 overnight bench (27/27 tasks, 12.3 s/task mean, against 21.4 s for Ollama with qwen3-coder:30b on the same core tool allowlist). Needs the llama.cpp build below.
 
 ```bash
 cd ~/dev/claude-local && ./bootstrap.sh --backend llamaserver \
-  --hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
-  --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 \
-  --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+  --hf jan1k/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-NVFP4-GGUF/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-MTP-NVFP4.gguf \
+  --sha256 af80d3ef030268c46d56f6d7d2722de67fe81592708bac6c8fa381461adfbaad
 ```
 
-URL, size (22853663008 bytes) and sha256 verified against huggingface.co on 2026-09-08. `--model-gguf` names the download: unsloth's non-MTP repo ships a different file under the same name (22360456160 bytes), and the `[qwen3.6-35b]` preset in `config/llama-models.ini.example` (reasoning off, `draft-mtp` n-max 2) expects the `-MTP` name. Without it the file keeps its remote name and gets a bare preset (`qwen3.6-35b-a3b-ud-q4_k_xl`). The device resolves to ROCm0 here (auto-detected; `--device Vulkan0` overrides).
+URL, size (22170261312 bytes) and sha256 verified against huggingface.co on 2026-09-09; the file keeps its remote name, which the `[qwen3.6-35b-genesis]` preset in `config/llama-models.ini.example` (reasoning off, `draft-mtp` n-max 2) expects. For the filtered original use `--hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf`: the `[qwen3.6-35b]` preset expects the `-MTP` name, and unsloth's non-MTP repo ships a different file under the same name (22360456160 bytes). The device resolves to ROCm0 here (auto-detected; `--device Vulkan0` overrides).
 
 ## Required prerequisites
 
@@ -138,12 +137,11 @@ The launcher and statusline read the port from `~/.claude-local/env`. If an exis
 cd ~/dev/claude-local && ./bootstrap.sh
 ```
 
-**Recommended here (llama-server, Qwen3.6-35B-A3B MTP quant, device auto-detected):**
+**Recommended here (llama-server, the uncensored Genesis build of Qwen3.6-35B-A3B, device auto-detected):**
 ```bash
 cd ~/dev/claude-local && ./bootstrap.sh --backend llamaserver \
-  --hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
-  --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 \
-  --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+  --hf jan1k/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-NVFP4-GGUF/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-MTP-NVFP4.gguf \
+  --sha256 af80d3ef030268c46d56f6d7d2722de67fe81592708bac6c8fa381461adfbaad
 ```
 
 **With llama-server backend, GGUF from the Ollama manifest, and a draft model:**

@@ -29,10 +29,15 @@ Typical labels:
     # another model
     ./run.sh --label q8 --model qwen3-coder:30b-a3b-q8_0 -- ...
 
-To benchmark through the usage proxy (per-turn cache/latency rows):
+The runner starts the usage proxy itself for llama-server (`--proxy auto|1|0`, default auto: on for
+llama-server, off for Ollama): Qwen3.8's and the Genesis build's chat templates reject the `role:
+system` reminder Claude Code puts inside the conversation (in print mode from the first request), the
+proxy folds it away, and its per-turn rows land in `results/proxy/usage-<label>.jsonl`. The runner also
+sets `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off` and registers itself as a live session so the drain timer
+leaves the bench model resident. An external proxy still works with `--port <its port> --proxy 0`:
 
-    PROXY_PORT=1235 USAGE_LOG=/tmp/usage.jsonl python3 ../proxy.py &
-    ./run.sh --label via-proxy --port 1235 -- ...
+    PROXY_PORT=1235 USAGE_LOG=/tmp/usage.jsonl python3 ../config/proxy.py &
+    ./run.sh --label via-proxy --port 1235 --proxy 0 -- ...
 
 Paths given to claude flags must be absolute (claude runs inside the scratch
 repo). Caveats: wall time includes claude startup (~1-2s); the first turn of every run

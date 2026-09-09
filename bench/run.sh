@@ -18,18 +18,31 @@
 #   --timeout S           per-run wall timeout in seconds (default 420)
 #   --max-turns N         claude --max-turns (default 30)
 #   --notes "text"        free text stored in every row
+#   --proxy auto|1|0      run config/proxy.py in front of the server (default auto: on for
+#                         llamaserver, off for ollama). llama-server's chat templates for Qwen3.8
+#                         and the Genesis build of Qwen3.6 raise "System message must be at the
+#                         beginning" on the role:system message Claude Code puts inside the
+#                         conversation, so a direct run fails every turn (2026-09-09, genesis-core:
+#                         0/4, 180 s of retries per task); the proxy folds it away, strips the
+#                         <total_tokens> counter, rewrites claude-* model names and writes per-turn
+#                         usage rows to results/proxy/usage-<label>.jsonl. Its turns also keep the
+#                         shared last-use ledger warm. Independently of the proxy, the runner
+#                         registers itself as a live session (run/<pid>/session_model) for the
+#                         whole run: claude-local-drain never touches a live session's model, and
+#                         without that it unloaded the bench model every two minutes on 2026-09-09
+#                         (the ledger is written only by the launcher and the proxy).
 #   --                    everything after is passed to claude verbatim
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CONFIG_DIR="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
 [ -r "$CONFIG_DIR/env" ] && . "$CONFIG_DIR/env"
 LABEL=""; MODEL="${CLAUDE_LOCAL_MODEL:-qwen3-coder:30b}"; PORT="${CLAUDE_LOCAL_PORT:-1234}"
-TASKS=""; REPEAT=1; TIMEOUT=420; MAXTURNS=30; NOTES=""
+TASKS=""; REPEAT=1; TIMEOUT=420; MAXTURNS=30; NOTES=""; PROXY="${BENCH_PROXY:-auto}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --label) LABEL=$2; shift 2;; --model) MODEL=$2; shift 2;; --port) PORT=$2; shift 2;;
     --tasks) TASKS=$2; shift 2;; --repeat) REPEAT=$2; shift 2;; --timeout) TIMEOUT=$2; shift 2;;
-    --max-turns) MAXTURNS=$2; shift 2;; --notes) NOTES=$2; shift 2;;
+    --max-turns) MAXTURNS=$2; shift 2;; --notes) NOTES=$2; shift 2;; --proxy) PROXY=$2; shift 2;;
     --) shift; break;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac
@@ -53,12 +66,41 @@ fi
 flags_str=$(printf '%q ' "${EXTRA[@]}")
 stack_str=$("$HERE/stack.sh" 2>/dev/null || echo "")
 
+# A live session for the drain timer: run/<pid>/session_model names the model this run uses, so
+# claude-local-drain leaves it resident until the runner exits (the launcher does the same for
+# a session; a run dir whose pid is gone is reaped by the next launch).
+mkdir -p "$CONFIG_DIR/run/$$"; printf '%s' "$MODEL" > "$CONFIG_DIR/run/$$/session_model"; date +%s > "$CONFIG_DIR/run/$$/session_start"
+trap 'rm -rf "$CONFIG_DIR/run/$$"' EXIT
+# The usage proxy in front of the server (see --proxy above). Claude Code talks to it exactly as
+# a launcher session does; the ledger lives in the real run dir so a bench turn counts as use.
+PROXY_PID=""
+if [ "$PROXY" = 1 ] || { [ "$PROXY" = auto ] && [ "$BACKEND" = llamaserver ]; }; then
+  mkdir -p "$RES/proxy" "$CONFIG_DIR/run"; rm -f "$WORK/proxy_port"
+  PROXY_PORT=$((PORT + 100)) PROXY_PORT_FILE="$WORK/proxy_port" UPSTREAM_PORT="$PORT" \
+    USAGE_LOG="$RES/proxy/usage-$LABEL.jsonl" PROXY_BACKEND="$BACKEND" PROXY_SESSION_MODEL="$MODEL" \
+    PROXY_CHECKPOINT_S=0 PROXY_IDLE_UNLOAD_S=0 PROXY_STATE_DIR="$CONFIG_DIR/run" SLOTS_DIR="$CONFIG_DIR/slots" \
+    CLAUDE_LOCAL_LOG_DIR="$RES/proxy" CLAUDE_LOCAL_SESSION_DIR="$WORK" \
+    python3 "$CONFIG_DIR/proxy.py" 2>> "$RES/proxy/proxy-$LABEL.log" &
+  PROXY_PID=$!
+  for _ in $(seq 1 30); do [ -s "$WORK/proxy_port" ] && break; kill -0 "$PROXY_PID" 2>/dev/null || break; sleep 0.2; done
+  pp=$(cat "$WORK/proxy_port" 2>/dev/null)
+  if [ -n "$pp" ]; then
+    BASE_URL="http://localhost:${pp}"
+    echo "[bench] proxy :$pp -> :$PORT (usage rows results/proxy/usage-$LABEL.jsonl, log results/proxy/proxy-$LABEL.log)" >&2
+  else
+    echo "[bench] proxy did not start (results/proxy/proxy-$LABEL.log); connecting directly" >&2
+    kill "$PROXY_PID" 2>/dev/null; PROXY_PID=""
+  fi
+  trap '[ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null; rm -rf "$CONFIG_DIR/run/$$"' EXIT
+fi
+
 # Environment for the child claude: isolated config, local server, no nesting markers.
 run_claude() { # cwd is the task dir; args: prompt
   env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID \
       -u CLAUDE_PID -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN -u CLAUDE_CODE_BRIDGE_SESSION_ID \
       CLAUDE_CONFIG_DIR="$CONFIG_DIR" ANTHROPIC_BASE_URL="$BASE_URL" ANTHROPIC_AUTH_TOKEN=local \
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 CLAUDE_CODE_ATTRIBUTION_HEADER=0 \
+      CLAUDE_CODE_TOTAL_TOKENS_REMINDER="${CLAUDE_CODE_TOTAL_TOKENS_REMINDER:-off}" \
       timeout --signal=INT --kill-after=15 "$TIMEOUT" \
       claude -p "$1" --model "$MODEL" --output-format json --max-turns "$MAXTURNS" \
              --settings "{\"env\":{\"ANTHROPIC_BASE_URL\":\"${BASE_URL}\",\"ANTHROPIC_AUTH_TOKEN\":\"local\"}}" \

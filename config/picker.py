@@ -9,7 +9,8 @@ in LOADED_MODELS), lists every model with its load state:
     [idle]   model is installed but not loaded
 
 When CLAUDE_LOCAL_MODEL is set, skips the menu (exact match first, then
-substring) and returns non-interactively.
+substring) and returns non-interactively. CLAUDE_LOCAL_DEFAULT_MODEL (persisted in ~/.claude-local/env by
+bootstrap) is listed first and marked; an empty answer (Enter) picks it.
 
 Prints exactly one machine-readable line to stdout:  <ACTION>|<model-name>
     ACTION = LOAD -> launcher should load/pin the model first
@@ -24,6 +25,7 @@ import sys
 def main() -> None:
     models_path = os.environ["MODELS_JSON_PATH"]
     pre = os.environ.get("CLAUDE_LOCAL_MODEL") or ""
+    default = os.environ.get("CLAUDE_LOCAL_DEFAULT_MODEL") or ""
     loaded = {n.strip().lower() for n in (os.environ.get("LOADED_MODELS") or "").split(",") if n.strip()}
 
     try:
@@ -60,13 +62,19 @@ def main() -> None:
         result(pick)
         return
 
+    # the default model, if installed, goes first; Enter picks it
+    dflt = next((m for m in models if name(m) == default), None) if default else None
+    if dflt is None and default:
+        dflt = next((m for m in models if default.lower() in name(m).lower()), None)
+    if dflt is not None:
+        models = [dflt] + [m for m in models if m is not dflt]
     print("\nINSTALLED MODELS (an idle one is loaded on selection):", file=sys.stderr)
     for i, m in enumerate(models, 1):
         state = "LOADED" if name(m).lower() in loaded else "idle"
-        print(f"  {i:2d}) [{state:6s}] {name(m):<36s} {info(m)}", file=sys.stderr)
+        print(f"  {i:2d}) [{state:6s}] {name(m):<36s} {info(m)}{'   (default: Enter)' if m is dflt else ''}", file=sys.stderr)
 
     while True:
-        sys.stderr.write("\nPick a model number (or 'q' to quit): ")
+        sys.stderr.write(f"\nPick a model number ({'Enter = ' + name(dflt) + ', ' if dflt is not None else ''}'q' to quit): ")
         sys.stderr.flush()
         try:
             sel = input().strip()
@@ -77,6 +85,9 @@ def main() -> None:
         if sel.lower() in ("q", "quit", "exit"):
             print("ERR:aborted")
             sys.exit(1)
+        if sel == "" and dflt is not None:
+            result(name(dflt))
+            return
         if sel.isdigit() and 1 <= int(sel) <= len(models):
             break
         print("  invalid choice", file=sys.stderr)

@@ -10,6 +10,9 @@
 #
 # Env overrides:
 #   CLAUDE_LOCAL_MODEL        model name to use directly, skipping the menu
+#   CLAUDE_LOCAL_DEFAULT_MODEL  the menu lists this model first and Enter picks it; the smoke test
+#                             uses it too. Persisted in ~/.claude-local/env by bootstrap (the GGUF's
+#                             preset alias, or the Ollama model); qwen3.6-35b-genesis on this host.
 #   CLAUDE_LOCAL_PORT         server port (default 1234)
 #   CLAUDE_LOCAL_CONFIG       isolated config dir (default ~/.claude-local)
 #   CLAUDE_LOCAL_BACKEND      backend adapter name: ollama (default) | llamaserver

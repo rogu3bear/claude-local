@@ -54,6 +54,8 @@ cd ~/dev/claude-local/bench && ./run.sh --label my-config -- \
 
 ## Running through the proxy (with usage logging)
 
+Since 2026-09-09 `run.sh` starts the proxy itself for llama-server (`--proxy auto|1|0`, default auto): the Qwen3.8 and Genesis chat templates reject the `role: system` reminder Claude Code puts inside the conversation, the proxy folds it, and the rows land in `results/proxy/usage-<label>.jsonl`. The steps below are for an Ollama run or an external proxy (add `--proxy 0`).
+
 ```bash
 # Start proxy in background
 PROXY_PORT=1235 USAGE_LOG=/tmp/usage.jsonl python3 ../config/proxy.py &

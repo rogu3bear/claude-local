@@ -9,16 +9,20 @@
 #                  [--hf URL|OWNER/REPO/FILE.gguf] [--sha256 HEX] [--model-gguf PATH]
 #                  [--draft URL|PATH|none|default]  (default none)
 #
-# Recommended on Strix Halo (gfx1151): llama-server with the Qwen3.6-35B-A3B MTP quant, the
-# 2026-09-06 overnight winner (27/27, 12.3 s/task vs 21.4 s for Ollama + qwen3-coder:30b):
+# Recommended on Strix Halo (gfx1151): llama-server with the uncensored Genesis build of
+# Qwen3.6-35B-A3B (jan1k, abliterated; NVFP4 with the MTP head), the preset this host runs:
 #   ./bootstrap.sh --backend llamaserver \
-#     --hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
-#     --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 \
-#     --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
-#   --model-gguf names the download: unsloth's non-MTP repo ships a different file under the
-#   same name (22360456160 bytes), and the [qwen3.6-35b] preset in
-#   config/llama-models.ini.example (reasoning off, draft-mtp) expects the -MTP name.
-#   URL, size (22853663008 bytes) and sha256 verified against huggingface.co on 2026-09-08.
+#     --hf jan1k/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-NVFP4-GGUF/Qwen3.6-35B-A3B-Uncensored-Genesis-Final-MTP-NVFP4.gguf \
+#     --sha256 af80d3ef030268c46d56f6d7d2722de67fe81592708bac6c8fa381461adfbaad
+#   URL, size (22170261312 bytes) and sha256 verified against huggingface.co on 2026-09-09. The
+#   file keeps its remote name, which the [qwen3.6-35b-genesis] preset in
+#   config/llama-models.ini.example (reasoning off, draft-mtp n-max 2) expects. The filtered
+#   original, the 2026-09-06 overnight winner (27/27, 12.3 s/task vs 21.4 s for Ollama +
+#   qwen3-coder:30b), is unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+#   (sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1, 22853663008 bytes); pass it with
+#   --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf, because the
+#   [qwen3.6-35b] preset expects the -MTP name and unsloth's non-MTP repo ships a different
+#   file under the remote name (22360456160 bytes).
 #
 # Steps (each idempotent; re-running is safe and does not restart a healthy server):
 #   1. deps      git curl jq python3 systemd tar zstd; node+npm (nvm if absent); claude CLI
@@ -206,11 +210,12 @@ else
 fi
 # Persist the port for the launcher, statusline, bench and the ollama wrapper (defaults only; env vars win).
 run mkdir -p "$CONFIG"
-write_env_file() { # defaults only; explicit environment variables always win
+write_env_file() { # defaults only; explicit environment variables always win. MODEL is final only after step 4/4b, hence the second call.
   cat > "$CONFIG/env" <<EOF2
 : "\${CLAUDE_LOCAL_OLLAMA_PORT:=$PORT}"
 : "\${CLAUDE_LOCAL_LLAMASERVER_PORT:=$LLAMA_PORT}"
 : "\${CLAUDE_LOCAL_BACKEND:=$BACKEND}"
+: "\${CLAUDE_LOCAL_DEFAULT_MODEL:=$MODEL}"   # listed first in the picker, Enter picks it; the smoke test uses it
 case "\$CLAUDE_LOCAL_BACKEND" in
   llamaserver) : "\${CLAUDE_LOCAL_PORT:=\$CLAUDE_LOCAL_LLAMASERVER_PORT}" ;;
   *)           : "\${CLAUDE_LOCAL_PORT:=\$CLAUDE_LOCAL_OLLAMA_PORT}" ;;
@@ -384,6 +389,9 @@ EOF2
     say "speculative: ${spec_line:-<no draft configured>}"
   fi
 fi
+
+# The env file again, now that MODEL is the alias the launcher will use (unchanged for Ollama).
+if [ "$DRY" = 1 ]; then echo "  would write: $CONFIG/env (default model $MODEL)" >&2; else write_env_file; fi
 
 # ------------------------------------------------------------- 5. harness ----
 step "5/6 harness install (symlinks + drop-ins)"
