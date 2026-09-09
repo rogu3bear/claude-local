@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# claude-local-init — scaffold the thin per-project Claude Code layer into a repo.
+#
+# The universal safety guard and permission baseline live in the claude-local
+# harness and apply to every project, so this only adds the project-specific
+# pieces: a language-aware verify gate ("green" check), the heal safety net, and
+# a minimal settings.json (build-tool allowlist + a Stop verify hook).
+#
+# Usage: claude-local-init [target-dir] [--force]
+#   target-dir defaults to the current directory; --force overwrites existing files.
+set -euo pipefail
+
+TARGET="${1:-$PWD}"
+FORCE=0
+[ "${2:-}" = "--force" ] && FORCE=1
+HERE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+TPL="$HERE/config/templates"
+
+[ -d "$TARGET" ] || { echo "no such directory: $TARGET" >&2; exit 1; }
+cd "$TARGET"
+
+if   [ -f Cargo.toml ]; then
+  LANG=rust;   BUILD='cargo build --quiet && cargo test --quiet'
+  ALLOW='"Bash(cargo *)"'
+elif [ -f package.json ]; then
+  LANG=node;   BUILD='npm run build --if-present && npm test --if-present'
+  ALLOW='"Bash(npm *)", "Bash(npx *)", "Bash(node *)", "Bash(pnpm *)", "Bash(yarn *)"'
+elif [ -f go.mod ]; then
+  LANG=go;     BUILD='go build ./... && go test ./...'
+  ALLOW='"Bash(go *)"'
+elif [ -f pyproject.toml ] || [ -f setup.py ] || ls ./*.py >/dev/null 2>&1; then
+  LANG=python; BUILD='python3 -m compileall -q . && { pytest -q || [ $? -eq 5 ]; }'
+  ALLOW='"Bash(python *)", "Bash(python3 *)", "Bash(pytest *)", "Bash(pip *)"'
+else
+  LANG=generic; BUILD='echo "no build configured; edit .claude/scripts/verify.sh" >&2; exit 0'
+  ALLOW='"Bash(make *)"'
+fi
+
+echo "detected: $LANG  (target: $TARGET)"
+mkdir -p .claude/hooks .claude/scripts
+
+skip() { # skip DEST -> 0 if we should skip (exists and not --force)
+  if [ -e "$1" ] && [ "$FORCE" != 1 ]; then echo "  keep   $1 (exists; --force to overwrite)"; return 0; fi
+  return 1
+}
+
+# verify.sh — the only language-specific file
+if ! skip .claude/scripts/verify.sh; then
+  cat > .claude/scripts/verify.sh <<VERIFY
+#!/bin/bash
+# Green check for this project ($LANG). Exit 0 = green. Edit to taste.
+set -e
+$BUILD
+VERIFY
+  chmod +x .claude/scripts/verify.sh
+  echo "  write  .claude/scripts/verify.sh"
+fi
+
+# heal.sh + verify_build.py — generic templates
+if ! skip .claude/scripts/heal.sh; then
+  cp "$TPL/heal.sh" .claude/scripts/heal.sh; chmod +x .claude/scripts/heal.sh
+  echo "  write  .claude/scripts/heal.sh"
+fi
+if ! skip .claude/hooks/verify_build.py; then
+  cp "$TPL/verify_build.py" .claude/hooks/verify_build.py
+  echo "  write  .claude/hooks/verify_build.py"
+fi
+
+# settings.json — build-tool allow + Stop verify gate (guard comes from the harness)
+if ! skip .claude/settings.json; then
+  cat > .claude/settings.json <<SETTINGS
+{
+  "permissions": {
+    "allow": [ $ALLOW, "Bash(bash *)" ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"\$CLAUDE_PROJECT_DIR/.claude/hooks/verify_build.py\"",
+            "timeout": 600,
+            "statusMessage": "verify gate"
+          }
+        ]
+      }
+    ]
+  }
+}
+SETTINGS
+  echo "  write  .claude/settings.json"
+fi
+
+echo "done. next: run 'bash .claude/scripts/verify.sh' to confirm green, then 'bash .claude/scripts/heal.sh mark-green'."

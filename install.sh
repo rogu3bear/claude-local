@@ -33,6 +33,7 @@ link "$HERE/bin/llama-server-run" "$BIN/llama-server-run"
 link "$HERE/bin/llama-models-ini" "$BIN/llama-models-ini"
 link "$HERE/bin/claude-local-doctor" "$BIN/claude-local-doctor"
 link "$HERE/bin/claude-local-drain" "$BIN/claude-local-drain"
+link "$HERE/bin/claude-local-init" "$BIN/claude-local-init"
 for f in backend-ollama.sh backend-llamaserver.sh picker.py proxy.py clog.py mcp-websearch.py hook-urlguard.py hook-audit.py hook-guard.py statusline.sh system_prompt.md system_prompt_compact.md settings.json; do
   link "$HERE/config/$f" "$CONFIG/$f"
 done
