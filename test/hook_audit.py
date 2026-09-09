@@ -34,6 +34,8 @@ def pre(tool, inp):
 run(pre("Bash", {"command": "ls -la"}), False, "plain command allowed")
 run(pre("Bash", {"command": "rm -rf build/"}), False, "rm -rf of a subdirectory allowed")
 run(pre("Bash", {"command": "rm -rf /"}), True, "rm -rf / denied")
+run(pre("Bash", {"command": "rm -rf /*"}), True, "rm -rf /* denied")
+run(pre("Bash", {"command": "rm -rf *.o"}), False, "rm -rf *.o allowed")
 run(pre("Bash", {"command": "rm -rf ~"}), True, "rm -rf ~ denied")
 run(pre("Bash", {"command": "cd /tmp && rm -rf ."}), True, "rm -rf . denied")
 run(pre("Bash", {"command": "rm -rf .git"}), True, "rm -rf .git denied")
@@ -70,10 +72,10 @@ run({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": None}, 
 rows = [json.loads(l) for l in open(os.path.join(sess, "tools.jsonl"))]
 evs = [json.loads(l) for l in open(os.path.join(sess, "events.jsonl"))]
 kinds = [e["kind"] for e in evs]
-c1 = sum(1 for r in rows if r.get("denied")) == 18
-c2 = kinds.count("tool_denied") == 18 and "tool_failed" in kinds and "tool_outside_cwd" in kinds and "hook_exception" not in kinds
+c1 = sum(1 for r in rows if r.get("denied")) == 19
+c2 = kinds.count("tool_denied") == 19 and "tool_failed" in kinds and "tool_outside_cwd" in kinds and "hook_exception" not in kinds
 c3 = any(r.get("event") == "fail" and r.get("ok") is False for r in rows) and any(r.get("event") == "post" and r.get("ok") is False and r.get("err") == "boom" for r in rows)
-for ok, what in ((c1, f"audit rows: 18 denials ({sum(1 for r in rows if r.get('denied'))})"), (c2, f"events: {sorted(set(kinds))}"), (c3, "post/fail rows carry ok=false and the error")):
+for ok, what in ((c1, f"audit rows: 19 denials ({sum(1 for r in rows if r.get('denied'))})"), (c2, f"events: {sorted(set(kinds))}"), (c3, "post/fail rows carry ok=false and the error")):
     print(("ok   " if ok else "FAIL ") + what)
     if not ok:
         fails.append(what)

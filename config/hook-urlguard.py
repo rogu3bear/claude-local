@@ -6,7 +6,9 @@ non-existent GitHub repos in one session on 2026-09-08). This hook allows a WebF
 only when the URL equals, lies under, or is a still-specific ancestor (host/a/b) of a
 URL that already appeared in the conversation in something other than the model's own
 words: a user message, a web_search result, a file it read, a command's output. A bare
-host that was mentioned licenses only its root page, never invented paths beneath it.
+host that was mentioned licenses only its root page, never invented paths beneath it. A
+loopback host (localhost, 127.0.0.1, [::1], with its port) counts like any other host once
+the user or a tool output mentioned it; trailing punctuation after a URL is ignored.
 Anything else is denied with a reason that tells the model to search first.
 
 Wired in config/settings.json under hooks.PreToolUse (matcher WebFetch). Claude Code
@@ -57,14 +59,18 @@ def seen_text(transcript_path):
     return "\n".join(out).lower()
 
 
-URL_RE = re.compile(r'(?:https?://)?(?:www\.)?([a-z0-9][a-z0-9.-]*\.[a-z]{2,})(/[^\s"\'<>)\]]*)?', re.I)
+# A host is a dotted name with a TLD, or a loopback address (the local docs or dev server the
+# user pointed at). An explicit port is part of the host: localhost:3000 and localhost:9999 are
+# two hosts. The generic form comes first so localhost.example.com is not cut at "localhost".
+URL_RE = re.compile(r'(?<![\w.-])(?:https?://)?(?:www\.)?((?:[a-z0-9][a-z0-9.-]*\.[a-z]{2,}|localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d{1,5})?)(/[^\s"\'<>)\]]*)?', re.I)
 
 
 def _split(host, path):
     host = host.lower()
     if host.startswith("www."):
         host = host[4:]
-    parts = [p for p in urllib.parse.urlsplit("//" + host + (path or "")).path.split("/") if p]
+    path = (path or "").rstrip(".,;:!?")          # "see https://x.y/docs/a, then" mentions /docs/a
+    parts = [p for p in urllib.parse.urlsplit("//" + host + path).path.split("/") if p]
     return host, parts
 
 

@@ -32,6 +32,7 @@ try:
     import clog
 except ImportError:
     clog = None
+LOGS = clog.log_dir() if clog else os.path.join(CONFIG, "logs")
 
 ARGS = sys.argv[1:]
 QUIET = "--quiet" in ARGS
@@ -208,6 +209,7 @@ def check_llamaserver(port):
     # INI vs files vs router
     rc, ini_path = sh(f'. "{CONFIG}/llama-server.env" 2>/dev/null; echo "${{LLAMA_ARG_MODELS_PRESET:-{CONFIG}/llama-models.ini}}"')
     ini_path = ini_path or os.path.join(CONFIG, "llama-models.ini")
+    gguf_sizes = []
     if os.path.exists(ini_path):
         sections, cur, problems = {}, None, []
         for line in open(ini_path, encoding="utf-8", errors="replace"):
@@ -226,6 +228,7 @@ def check_llamaserver(port):
             if not os.path.exists(path):
                 problems.append(f"[{name}] model file missing: {path}"); continue
             ok, size = gguf_ok(path)
+            gguf_sizes.append(size)
             if not ok:
                 problems.append(f"[{name}] not a GGUF (bad magic): {path}")
             elif size < 500_000_000:
@@ -269,8 +272,28 @@ def check_llamaserver(port):
                 "Claude's autocompact floor is 100000: raise LLAMA_ARG_CTX_SIZE or lower CLAUDE_LOCAL_MAX_OUTPUT or long sessions truncate")
         np_ = have.get("LLAMA_ARG_N_PARALLEL", "1")
         rep("INFO", "server", "slots per model", f"-np {np_}: subagents and a parent share {'one slot and evict each other' if np_ == '1' else 'slots'}")
+        # RAM budget: the prompt cache is per model instance, weights and KV live in GTT (system RAM too).
+        cache_mib = int(have.get("LLAMA_ARG_CACHE_RAM") or 8192)
+        nmax = int(have.get("LLAMA_ARG_MODELS_MAX") or 1)
+        mem_mib = int(open("/proc/meminfo").readline().split()[1]) // 1024
+        weights_mib = sum(sorted(gguf_sizes, reverse=True)[:nmax]) // 2**20
+        kv_mib = 8192 * nmax          # allowance per instance for KV + compute buffers at 128K q8_0
+        need = cache_mib * nmax + weights_mib + kv_mib
+        room = mem_mib - need
+        rep("PASS" if room >= 16384 else "WARN", "server", "memory budget",
+            f"{nmax} x {cache_mib} MiB RAM cache + {weights_mib} MiB weights (largest {nmax}) + {kv_mib} MiB KV allowance = {need} MiB of {mem_mib} MiB RAM; {room} MiB left",
+            "the RAM prompt cache is per model instance: LLAMA_ARG_CACHE_RAM x LLAMA_ARG_MODELS_MAX plus the weights must leave room for the "
+            "desktop and builds; lower one of them (2026-09-08: 32 GB x 2 put the unit at 47 GB RAM + 4.7 GB swap)")
     except OSError:
         rep("INFO", "server", "drop-in check", "cannot read the unit's environment", "")
+    rc, out = sh(f"systemctl --user show {unit} -p MemoryPeak -p MemorySwapPeak -p MemoryCurrent 2>/dev/null")
+    pk = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+    try:
+        mp, sp, mc = (int(pk.get(k) or 0) // 2**20 for k in ("MemoryPeak", "MemorySwapPeak", "MemoryCurrent"))
+        rep("WARN" if sp > 512 else "PASS", "server", "unit memory since it started", f"now {mc} MiB, peak {mp} MiB, swap peak {sp} MiB",
+            "the unit's RAM prompt caches were paged out: lower LLAMA_ARG_CACHE_RAM or LLAMA_ARG_MODELS_MAX (see memory budget)")
+    except ValueError:
+        pass
     # slot files
     slots = glob.glob(os.path.join(CONFIG, "slots", "*.bin"))
     total = sum(os.path.getsize(s) for s in slots)
@@ -358,7 +381,12 @@ def check_sessions():
         errs = sum(1 for l in open(os.path.join(d, "events.jsonl")) if '"level": "error"' in l) if os.path.exists(os.path.join(d, "events.jsonl")) else 0
         det.append(f"pid {os.path.basename(d)} {model} {int((time.time() - start) / 60) if start else '?'}min {rows} turns {errs} errors")
     rep("INFO", "sessions", "live launchers", "; ".join(det) or "none")
-    rep("PASS" if not stale else "WARN", "sessions", "stale session dirs", f"{len(stale)}" if stale else "none", "left by crashed launchers; the next claude-local start reaps them")
+    unarch = [d for d in stale if os.path.exists(os.path.join(d, "session_start"))
+              and not glob.glob(os.path.join(LOGS, "sessions", f"*-{os.path.basename(d)}"))]
+    rep("WARN" if unarch else "PASS", "sessions", "stale session dirs",
+        f"{len(stale)}, {len(unarch)} from a killed launcher and not yet archived" if stale else "none",
+        "every exit leaves its run dir until the next launch reaps it; one with no archive under logs/sessions was killed before its exit path, "
+        "and the next launch archives it before reaping (session_reaped event)")
     rc, out = sh("pgrep -af 'python3 .*proxy\\.py' | grep -v pgrep")
     orphans = []
     for line in out.splitlines():
@@ -435,8 +463,15 @@ def check_logs():
         last = v[-1]
         detail = " ".join(f"{k}={str(last[k])[:80]}" for k in ("status", "err_class", "err_msg", "model", "error", "tool", "summary") if k in last)
         rep("INFO", "logs", f"  last {kind}", f"{time.strftime('%m-%d %H:%M', time.localtime(last['ts']))} {detail}", "")
-        if last.get("hint") and not QUIET:
+        if last.get("hint") and not QUIET and not JSON:
             print(f"     \033[2m-> {last['hint']}\033[0m")
+    hosted = sorted({e["model"] for v in errs.values() for e in v
+                     if e.get("kind") == "turn_failed" and str(e.get("model") or "").startswith("claude-")})
+    if hosted:
+        rep("WARN", "logs", "hosted model names sent to the local router", ", ".join(hosted),
+            "a Claude Code feature (auto-mode classifier, a subagent's model alias, context collapse) asked for an Anthropic model; "
+            "the launcher pins those aliases to the session model and never starts in auto mode since 2026-09-08 "
+            "(CLAUDE_LOCAL_PERMISSION_MODE); a session started before that, or without the launcher, still does this")
     rep("PASS" if not warns else "WARN", "logs", f"warning events ({since_s // 3600}h)",
         ", ".join(f"{k[1]} x{len(v)}" for k, v in sorted(warns.items(), key=lambda kv: -len(kv[1]))) or "none", "")
     cm = by.get(("warn", "cache_miss")) or []

@@ -103,7 +103,10 @@ HINTS = {
                 "CLAUDE_LOCAL_PROXY_DEBUG=2 and look at the offending message.",
     "model_not_found": "the backend does not know this model name. The session is probably talking to the wrong "
                        "server (CLAUDE_LOCAL_BACKEND vs the preset name), or the preset was removed from "
-                       "llama-models.ini; check `curl :PORT/models` and the launcher banner.",
+                       "llama-models.ini; check `curl :PORT/models` and the launcher banner. A claude-* name means "
+                       "a Claude Code feature asked for a hosted model (auto-mode classifier, a subagent's model "
+                       "alias); the launcher pins those to the session model since 2026-09-08, so this came from a "
+                       "session started before that or without the launcher.",
     "model_load": "the model failed to load: bad path, truncated GGUF, or out of device memory. "
                   "journalctl --user -u llama-server.service -e; claude-local-doctor checks the GGUF files.",
     "context": "the prompt no longer fits the server context. Autocompact should have fired first: compare the "

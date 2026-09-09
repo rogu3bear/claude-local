@@ -10,7 +10,7 @@ Behaviour is chosen per request by the *last user message text* (so a test drive
 prompt) or by the STUB_SCRIPT env (a comma list consumed one item per Messages request):
   ok            200, streams a short text reply, usage says the whole prompt was cached
   cold          200, like ok but cache_read_input_tokens = 0
-  tool          200, answers with a Bash tool_use (echo stub) so the client sends a second turn
+  tool          200, answers with a Bash tool_use (STUB_TOOL_CMD, default `echo stub`) so the client sends a second turn
   500           500 {"error":{"code":500,"message":"Jinja Exception: System message must be at the beginning","type":"server_error"}}
   404           404 model not found (what Ollama answers for an unknown name)
   400           400 context length exceeded
@@ -36,6 +36,7 @@ REQUESTS_LOG = os.environ.get("REQUESTS_LOG") or "/dev/null"
 SCRIPT = [s for s in (os.environ.get("STUB_SCRIPT") or "").split(",") if s]
 HANG_S = float(os.environ.get("STUB_HANG_S") or 5)
 DELAY_S = float(os.environ.get("STUB_DELAY_S") or 0.3)
+TOOL_CMD = os.environ.get("STUB_TOOL_CMD") or "echo stub"
 _lock = threading.Lock()
 _calls = 0
 _state = {"loaded": True, "processing": os.environ.get("STUB_PROCESSING") == "1"}   # router preset "stub"
@@ -143,7 +144,7 @@ class H(BaseHTTPRequestHandler):
         cached = 0 if mode == "cold" else prompt
         stop = "max_tokens" if mode == "maxtok" else ("tool_use" if mode == "tool" else "end_turn")
         if mode == "tool":
-            content = [{"type": "tool_use", "id": f"toolu_stub_{int(time.time() * 1000) % 100000000}", "name": "Bash", "input": {"command": "echo stub", "description": "stub tool call"}}]
+            content = [{"type": "tool_use", "id": f"toolu_stub_{int(time.time() * 1000) % 100000000}", "name": "Bash", "input": {"command": TOOL_CMD, "description": "stub tool call"}}]
             deltas = [("input_json_delta", {"partial_json": json.dumps(content[0]["input"])})]
         else:
             content = [{"type": "text", "text": "STUBOK"}]

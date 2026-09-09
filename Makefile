@@ -1,4 +1,4 @@
-.PHONY: bootstrap install check check-llama check-checkpoint check-idle check-interactive check-prefix test doctor drain-status bench bench-shipped compare lint
+.PHONY: bootstrap install check check-llama check-checkpoint check-idle check-interactive check-prefix check-guard test doctor drain-status bench bench-shipped compare lint
 # The launcher's default --tools list, read from the one place it is defined.
 SHIPPED_TOOLS = $(shell sed -n 's/^TOOLS="$${CLAUDE_LOCAL_TOOLS-\(.*\)}"$$/\1/p' bin/claude-local)
 bootstrap:          ## fresh machine -> working claude-local; flags via ARGS='--gpu cpu --dry-run'
@@ -7,15 +7,19 @@ install:            ## symlink into ~/.local/bin and ~/.claude-local
 	./install.sh
 lint:               ## syntax-check every script
 	bash -n bootstrap.sh bin/claude-local bin/llama-server-run bin/llama-models-ini config/backend-ollama.sh config/backend-llamaserver.sh config/statusline.sh bench/run.sh test/smoke.sh test/checkpoint.sh test/idle-unload.sh install.sh
-	python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" config/picker.py config/proxy.py config/clog.py config/mcp-websearch.py config/hook-urlguard.py config/hook-audit.py bin/claude-local-doctor bin/claude-local-drain bench/compare.py test/interactive.py test/proxy_events.py test/hook_audit.py test/stub_upstream.py test/prefix.py test/drain.py
+	python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" config/picker.py config/proxy.py config/clog.py config/mcp-websearch.py config/hook-urlguard.py config/hook-audit.py bin/claude-local-doctor bin/claude-local-drain bench/compare.py test/interactive.py test/proxy_events.py test/hook_audit.py test/stub_upstream.py test/prefix.py test/drain.py test/urlguard.py test/guard_mode.py test/launcher.py
 	python3 -c "import json,sys; json.load(open('config/settings.json'))"
 	@echo lint ok
-test: lint          ## offline tests, no model server: proxy error/anomaly events, hook guards (~10s)
+test: lint          ## offline tests, no model server: proxy error/anomaly events, hook guards, URL guard, drain, launcher flags (~15s)
 	python3 test/proxy_events.py
 	python3 test/hook_audit.py
+	python3 test/urlguard.py
 	python3 test/drain.py
+	python3 test/launcher.py
 check-prefix:       ## offline: real `claude -p` through proxy+stub; every follow-up request must be a pure prefix extension
 	python3 test/prefix.py
+check-guard:        ## offline: real `claude -p` through the stub in each pinned permission mode; a refused Bash command must stay refused
+	python3 test/guard_mode.py
 doctor:             ## read-only diagnosis: install, server, GPU/memory, sessions, drain, error logs (safe next to a live session)
 	bin/claude-local-doctor $(ARGS)
 drain-status:       ## what is resident, who uses it, and what the drain timer would unload now

@@ -92,10 +92,9 @@ If VRAM is exhausted, the server will fail or swap to CPU (extremely slow). The 
 ss -tlnp | grep -E ':(1234|1244|1235|1245)\b'
 ```
 
-If two processes bind the same port, the newer one fails silently. Kill the stale process:
-```bash
-fuser -k 1234/tcp  # or whichever port is conflicted
-```
+If two processes bind the same port, the newer one fails silently. `claude-local-doctor` lists orphan proxies
+with their pids; report them and let the user kill a stale one. Never free a port the live session uses
+(`fuser -k 1244/tcp`, `fuser -k <proxy port>/tcp`): the guard refuses it, and the turn would die with it.
 
 ## Step 6: Read the usage proxy log
 
@@ -135,6 +134,7 @@ claude-local-doctor --since 10m                   # confirm /health 200 and no f
 | Model won't load after picker says LOAD | Backend adapter failed silently | Check `journalctl --user -u <service>` for the actual error |
 | Cache hit drops to near 0 | Something before the conversation tail changes every turn (Claude Code's `<total_tokens>` reminder did this on 2026-09-08), or a subagent shares the single slot | `cache_miss` events carry `div`; `make check-prefix` reproduces offline; `conv_switch` events show slot sharing |
 | "waiting for API", "API Error" in the session | Claude Code retrying a failing turn (up to 11 attempts) | `events.jsonl`: the `turn_failed` / `upstream_unreachable` / `stream_incomplete` event says why; `retry_storm` marks the loop |
+| `turn_failed` with `model_not_found` for a `claude-*` name ("issue with the selected model") | A Claude Code feature asked for a hosted model: the auto-mode classifier (~35K-token prompt per tool call, then retried on the local slot), a subagent with a model alias, context collapse | The launcher pins the aliases and passes `--permission-mode acceptEdits` since 2026-09-08 (`CLAUDE_LOCAL_PERMISSION_MODE`); do not switch a local session to auto mode; a session started without the launcher has neither |
 
 ## llama-server-specific: slot cache
 

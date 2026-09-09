@@ -16,6 +16,7 @@ backed by a benchmark number.
     make drain-status       # what is resident, who uses it, what the drain timer will unload
     make check              # offline tests + one smoke turn through launcher and proxy
     make check-interactive  # pty-driven full session (picker, statusline, Ctrl-C, exit menu)
+    make check-guard        # offline: a refused Bash command stays refused in every pinned permission mode
     make check-checkpoint   # kill an idle llama-server model instance, expect the proxy to resume it warm
     make check-idle         # load a throwaway preset, expect the proxy to checkpoint and unload it when idle
     make bench LABEL=x      # benchmark a configuration; make compare to read results
@@ -46,7 +47,12 @@ polls the status). Up to two models stay resident (`LLAMA_ARG_MODELS_MAX=2`; two
 56GB of the 108GB pool and answer independently, leaving room for KV, the RAM prompt cache and the
 desktop); beyond that, picking another saves the least recently used model's prompt cache and evicts it. Tuning that should not drift lives in
 `systemd/llama-server/10-claude-local.conf` (128K context, q8_0 KV with flash attention, one
-slot, Ollama-parity batch sizes, cache reuse) and is inherited by every model instance.
+slot, Ollama-parity batch sizes, cache reuse, a 16 GB RAM prompt cache per instance) and is inherited
+by every model instance. The cache is what brings a parent context back after a subagent or a WebFetch
+summary took the single slot; measured 2026-09-08 at ~70 MB per 1K tokens on the Qwen3.6 presets, so
+16 GB holds a full 112K-token parent plus several side contexts. It is per instance: at 32 GB with two
+presets resident the unit peaked at 47 GB RAM plus 4.7 GB of swap, which is why the doctor now checks
+`LLAMA_ARG_CACHE_RAM` x `LLAMA_ARG_MODELS_MAX` plus the largest weights against the host's RAM.
 
     llama-models-ini                                   # add every new GGUF under ~/.claude-local/models to the INI
     curl -s 'http://127.0.0.1:1244/models?reload=1'    # re-read the INI without a restart (editing a section)
@@ -97,12 +103,15 @@ Every failure the stack can see is one JSON line in two places: the session's `r
 and `~/.claude-local/logs/events.jsonl` (rotated at 20 MB; the session dir is reaped by the next launcher,
 the global log is not). `config/clog.py` writes them; the proxy, the launcher, the hooks and the doctor
 all use it. At exit the launcher archives the session's small files (usage rows, events, tool audit, proxy
-log, Claude Code's own debug log) to `logs/sessions/<start>-<pid>/`, keeping the last 40.
+log, Claude Code's own debug log) to `logs/sessions/<start>-<pid>/`, keeping the last 40. A launcher that
+was killed before its exit path (a closed terminal, a logout) is archived by the next launch before its run
+dir is reaped, with a `session_reaped` event.
 
     claude-local-doctor            # read-only diagnosis, safe next to a live session (make doctor)
     claude-local-doctor --since 2h --quiet
-    make test                      # offline: proxy error/anomaly events, hook guards, no model server (~10s)
+    make test                      # offline: proxy error/anomaly events, hook guards, URL guard, drain, no model server (~10s)
     make check-prefix              # offline: real `claude -p` through proxy+stub, every follow-up request must extend the previous one
+    make check-guard               # offline: real `claude -p` through the stub in acceptEdits and bypassPermissions; the guard must still refuse
     tail -f ~/.claude-local/logs/events.jsonl | jq -c '{level,kind,hint}'
 
 What the proxy records (`config/proxy.py`), each with a `hint` saying what to do:
@@ -148,6 +157,18 @@ Write/Edit to a flattened path (`-home-user-...`, seen from small models), an in
 directory, the real `~/.claude`, or a system directory. Refusals are `tool_denied` events and show on the
 statusline. `CLAUDE_LOCAL_BASHGUARD=0`, `CLAUDE_LOCAL_PATHGUARD=0`, `CLAUDE_LOCAL_AUDIT=0` switch the parts off.
 
+**Permission mode and model names stay local.** The launcher passes `--permission-mode` (`CLAUDE_LOCAL_PERMISSION_MODE`,
+default `acceptEdits`; `manual`, `plan`, `dontAsk`, `bypassPermissions` and `auto` are the other values, and a mode
+or `--dangerously-skip-permissions` on the command line wins) and never starts in auto mode by itself: auto mode's
+classifier sends a ~35K-token prompt to a hosted model for every tool call it evaluates, which against this router is
+an HTTP 400 for `claude-sonnet-5` followed by the same prompt on the single local slot as a fallback (seen 2026-09-08,
+the "issue with the selected model" API error). The guard above is the gate in every mode; `make check-guard` runs a
+real `claude -p` against the stub in `acceptEdits` and `bypassPermissions` and requires the refused command to stay
+refused. For the same reason the launcher pins every internal model choice to the session model unless the variable
+is already set: `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL`,
+`CLAUDE_CODE_BG_CLASSIFIER_MODEL` and `CLAUDE_CONTEXT_COLLAPSE_MODEL`, so a subagent asked for "haiku" never reaches the
+router with a name it does not know. The doctor flags any `claude-*` name that still gets through.
+
 The statusline's second line shows the session's last error or warning for ten minutes
 (`!! turn_failed 500 template (1 err)`), so a retry loop is visible without opening any log.
 
@@ -156,8 +177,10 @@ The statusline's second line shows the session's last error or warning for ten m
 the window, `/health`, router presets and their `failed` flag, the INI against the GGUF files (missing,
 truncated, bad magic, colons, duplicates) and against what the server has loaded (INI edited but not
 reloaded), the drop-in against the running unit's environment (changed but not restarted), context vs
-autocompact, orphan slot files; memory, swap, GPU memory, kernel GPU resets and OOM kills, disk; live
-launchers, stale session dirs, orphan proxies, ports, the idle-unload ledger; the event log by kind with
+autocompact, the RAM budget (`LLAMA_ARG_CACHE_RAM` x `LLAMA_ARG_MODELS_MAX` plus the largest weights against RAM)
+and the unit's memory and swap peaks since it started, orphan slot files; memory, swap, GPU memory, kernel GPU
+resets and OOM kills, disk; live launchers, stale session dirs (and which of them a killed launcher left
+unarchived), orphan proxies, ports, the idle-unload ledger; the event log by kind with
 the last occurrence's hint, tool denials and failures, Claude Code's API-error lines, and the median cache
 hit of live sessions. It never restarts, kills or edits anything.
 
@@ -308,11 +331,11 @@ Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29
 | `systemd/ollama.service` | generic unit template (no GPU or tuning env; those are drop-ins) |
 | `systemd/10-claude-local.conf` | drop-in: flash attention, 128K context, q8_0 KV, one slot, 2h keep-alive. Flash attention lives here because q8_0 KV silently falls back to f16 without it |
 | `systemd/20-gpu-*.conf` | GPU profile drop-ins; bootstrap installs the chosen one as `20-gpu.conf` |
-| `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=2`); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
+| `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=2` and a 16 GB RAM prompt cache per instance); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
 | `config/backend-llamaserver.sh` | llama-server adapter: router inventory with load state, load/unload via `/models/*` with status polling, per-model props, slot save/restore (single-model mode still supported) |
 | `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner, comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs); results in `bench/results` |
 | `skills/` | operator skills (configure/diagnose backend, manage models, tune, bench, bootstrap); linked into `~/.claude-local/skills` but only loaded when `Skill` is added to `CLAUDE_LOCAL_TOOLS`, which the 2026-09-05 measurements found to be a turn sink |
-| `test/` | smoke turn, pty-driven interactive session, checkpoint/resume test |
+| `test/` | smoke turn, pty-driven interactive session, checkpoint/resume and idle-unload tests; offline: proxy events, hook and URL guards, drain, prefix stability, guard under each permission mode (all against `test/stub_upstream.py`) |
 
 All env overrides are listed at the top of `bin/claude-local`.
 

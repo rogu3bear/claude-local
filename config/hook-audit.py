@@ -90,7 +90,7 @@ def serving_ports():
 
 BASH_RULES = [
     # (regex on the whole command, reason)
-    (r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*|-r\s+-f|-f\s+-r)\s+(--\s+)?(/|~|\$HOME|\$\{HOME\}|/home/?|\.\.?|\*|\.git)(\s|$|/\*)",
+    (r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*|-r\s+-f|-f\s+-r)\s+(--\s+)?(/|~|\$HOME|\$\{HOME\}|/home/?|\.\.?|\*|\.git)(\s|$|/\*|\*)",
      "recursive delete of the root, home, the working directory, its parent or .git"),
     (r"\bmkfs(\.\w+)?\b|\bdd\s+.*\bof=/dev/(sd|nvme|hd|vd|mmcblk)|\bwipefs\b|>\s*/dev/(sd|nvme|hd|vd|mmcblk)",
      "writes to a block device"),

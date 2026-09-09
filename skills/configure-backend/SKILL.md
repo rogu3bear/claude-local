@@ -26,7 +26,7 @@ Environment=LLAMA_ARG_FLASH_ATTN=on             # flash attention (required for 
 Environment=LLAMA_ARG_CACHE_TYPE_K=q8_0         # K cache quantized (faster on iGPU)
 Environment=LLAMA_ARG_CACHE_TYPE_V=q8_0         # V cache quantized
 Environment=LLAMA_ARG_CACHE_REUSE=256           # KV shift cache reuse distance
-Environment=LLAMA_ARG_CACHE_RAM=32768           # keep prompt cache in RAM (not swap)
+Environment=LLAMA_ARG_CACHE_RAM=16384           # RAM prompt cache, per model instance
 Environment=LLAMA_ARG_BATCH=2048                # batch size (Ollama parity)
 Environment=LLAMA_ARG_UBATCH=2048               # micro-batch size
 ```
@@ -219,9 +219,9 @@ Environment=LLAMA_ARG_FLASH_ATTN=on    # required for q8_0 KV
 **Cache reuse and RAM:**
 ```ini
 Environment=LLAMA_ARG_CACHE_REUSE=256   # KV shift cache reuse distance
-Environment=LLAMA_ARG_CACHE_RAM=32768   # keep prompt cache in RAM (not swap)
+Environment=LLAMA_ARG_CACHE_RAM=16384   # RAM prompt cache, per model instance
 ```
-Higher `CACHE_RAM` (MiB) keeps more evicted contexts in RAM, about 1GB per 10K tokens. 32768 is the default since 2026-09-08 so a parent context survives its subagents taking the single slot; the host has 125GB.
+Higher `CACHE_RAM` (MiB) keeps more evicted contexts in RAM: measured 2026-09-08 at ~70 MB per 1K tokens on the Qwen3.6 presets, so a full 112K-token parent is ~8 GB. 16384 is the default since 2026-09-08 (it was 32768 for a day): the cache is **per model instance**, and with `LLAMA_ARG_MODELS_MAX=2` two 32 GB caches on top of ~52 GB of GTT for two sets of weights and KV pushed the 125 GB host into swap (unit peak 47 GB RAM + 4.7 GB swap). `claude-local-doctor` checks `CACHE_RAM x MODELS_MAX + largest weights` against RAM and the unit's swap peak.
 
 ## Batch size tuning
 
