@@ -1,0 +1,14 @@
+#!/bin/bash
+# Refuse any commit message that credits an AI tool as an author.
+# Attribution belongs in prose if it matters, never as an authorship trailer.
+set -euo pipefail
+msg_file="${1:-}"
+[ -n "$msg_file" ] && [ -f "$msg_file" ] || exit 0
+FORBIDDEN='(Co-Authored-By:[[:space:]]*(Claude|GPT|Copilot|Gemini|Codex|Cursor|Devin|OpenAI|Anthropic)|Claude-Session:|Assistant-Session:|Generated with \[?Claude Code|https://claude\.ai/code/session|noreply@anthropic\.com|🤖)'
+if grep -qiE "$FORBIDDEN" "$msg_file"; then
+  echo "REFUSING this commit: the message credits an AI tool as an author." >&2
+  echo "Remove the attribution trailer(s) and commit again." >&2
+  grep -niE "$FORBIDDEN" "$msg_file" | sed 's/^/  /' >&2
+  exit 1
+fi
+exit 0

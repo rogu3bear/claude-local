@@ -73,6 +73,8 @@ if ! skip .claude/settings.json; then
   "permissions": {
     "allow": [ $ALLOW, "Bash(bash *)" ]
   },
+  "attribution": { "commit": "", "pr": "", "sessionUrl": false },
+  "includeCoAuthoredBy": false,
   "hooks": {
     "Stop": [
       {
@@ -90,6 +92,14 @@ if ! skip .claude/settings.json; then
 }
 SETTINGS
   echo "  write  .claude/settings.json"
+fi
+
+# Durable: forbid AI-attribution trailers in this repo's commits.
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  mkdir -p .githooks
+  cp "$TPL/commit-msg" .githooks/commit-msg && chmod +x .githooks/commit-msg
+  git config core.hooksPath .githooks
+  echo "  hook   .githooks/commit-msg (no AI attribution) + core.hooksPath"
 fi
 
 # Never commit secrets or captured traffic.
