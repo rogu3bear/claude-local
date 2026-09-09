@@ -159,6 +159,11 @@ for p in procs:
 if KEEP:
     print(f"artifacts kept in {tmp}")
 else:
+    # Claude Code's transcript of this run: projects/<physical work dir with every non-alphanumeric
+    # character turned into "-"> in the isolated config; 61 of these from test runs had piled up by
+    # 2026-09-08 (same rule in test/guard_mode.py, test/interactive.py and bench/run.sh)
+    transcript = os.path.join(CONFIG, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(work)))
     shutil.rmtree(tmp, ignore_errors=True)
+    shutil.rmtree(transcript, ignore_errors=True)
 print("PREFIX PASS" if bad == 0 and len(turns) >= 2 else f"PREFIX FAIL: {bad} of {len(turns) - 1} follow-up requests are not pure extensions")
 sys.exit(0 if bad == 0 and len(turns) >= 2 else 1)

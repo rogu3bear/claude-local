@@ -43,18 +43,22 @@
 #   CLAUDE_LOCAL_DISALLOWED_TOOLS  extra comma list passed as --disallowedTools (default none)
 #   CLAUDE_LOCAL_PERMISSION_MODE  passed as --permission-mode unless the command line already carries
 #                             one (or --dangerously-skip-permissions): acceptEdits (default) | manual |
-#                             plan | dontAsk | bypassPermissions | auto. The launcher never starts in
-#                             auto mode by itself: auto mode's classifier sends a ~35K-token prompt to
+#                             plan | dontAsk | bypassPermissions. Not auto: settings.json sets
+#                             permissions.disableAutoMode, so Claude Code ignores --permission-mode auto
+#                             and hides the mode from Shift+Tab (verified 2026-09-09); auto mode's classifier sends a ~35K-token prompt to
 #                             a hosted model for every tool call it evaluates, which here is an HTTP 400
 #                             from the router and then the same prompt on the single local slot
 #                             (seen 2026-09-08). The deterministic guard in hook-audit.py is the gate
-#                             instead, in every mode (make check-guard proves it).
+#                             instead, in every mode (make check-guard proves it) (Claude Code 2.1.266).
 #   Model aliases             every internal model choice is pinned to the session model unless the
-#                             variable is already set: ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL,
-#                             CLAUDE_CODE_SUBAGENT_MODEL, CLAUDE_CODE_AUTO_MODE_MODEL,
-#                             CLAUDE_CODE_BG_CLASSIFIER_MODEL, CLAUDE_CONTEXT_COLLAPSE_MODEL. A subagent
-#                             asked for "haiku" or a classifier then never reaches the router with a
-#                             name it does not know.
+#                             variable is already set, six variables: ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL,
+#                             CLAUDE_CODE_AUTO_MODE_MODEL, CLAUDE_CODE_BG_CLASSIFIER_MODEL,
+#                             CLAUDE_CONTEXT_COLLAPSE_MODEL. A subagent asked for "haiku" or a classifier
+#                             then never reaches the router with a name it does not know.
+#                             CLAUDE_CODE_SUBAGENT_MODEL is left unset on purpose: Claude Code gives a
+#                             subagent the parent's current model unless it is set, so subagents follow
+#                             a mid-session /model switch. Any claude-* name that still reaches the proxy
+#                             is rewritten to the session's current model (model_rewritten event).
 #   CLAUDE_LOCAL_SAMPLING     JSON sampling override applied by the proxy to every request,
 #                             e.g. '{"temperature":0.7,"top_p":0.8,"top_k":20}' (default: none)
 #   CLAUDE_LOCAL_CHECKPOINT   seconds of idleness after a turn before the proxy saves the model's
@@ -338,7 +342,7 @@ if [ "$USE_PROXY" = "1" ]; then
   PROXY_PORT="$PROXY_PORT" PROXY_PORT_FILE="$SESSION_DIR/proxy_port" UPSTREAM_PORT="$PORT" \
     USAGE_LOG="$SESSION_DIR/usage.jsonl" \
     PROXY_BACKEND="$BACKEND" PROXY_CHECKPOINT_S="$CHECKPOINT" PROXY_IDLE_UNLOAD_S="$IDLE_UNLOAD" PROXY_STATE_DIR="$RUN_ROOT" SLOTS_DIR="$CONFIG_DIR/slots" \
-    PROXY_SAMPLING="${CLAUDE_LOCAL_SAMPLING:-}" PROXY_DEBUG="${CLAUDE_LOCAL_PROXY_DEBUG:-}" \
+    PROXY_SAMPLING="${CLAUDE_LOCAL_SAMPLING:-}" PROXY_DEBUG="${CLAUDE_LOCAL_PROXY_DEBUG:-}" PROXY_SESSION_MODEL="$MODEL" \
     python3 "$CONFIG_DIR/proxy.py" 2>> "$SESSION_DIR/proxy.log" &
   PROXY_PID=$!
   # The proxy binds its own port (atomic claim) and reports it via the port file.
@@ -375,15 +379,19 @@ export CLAUDE_LOCAL_PERMISSION_MODE="$PERMISSION_MODE"
 # auto-mode classifier, the background classifier and context collapse otherwise request a
 # hosted model name the router does not know (2026-09-08: the auto-mode classifier asked for
 # claude-sonnet-5, got HTTP 400, then ran its 35K-token prompt on the local slot as a fallback).
+# Six variables: CLAUDE_CODE_SUBAGENT_MODEL stays unset so subagents follow a mid-session
+# /model switch (Claude Code gives a subagent the parent's current model unless it is set).
+# Any claude-* name that still reaches the proxy is rewritten to the session's current model
+# there (model_rewritten event); the proxy learns the launch model through PROXY_SESSION_MODEL.
 for v in ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL \
-         CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_AUTO_MODE_MODEL CLAUDE_CODE_BG_CLASSIFIER_MODEL CLAUDE_CONTEXT_COLLAPSE_MODEL; do
+         CLAUDE_CODE_AUTO_MODE_MODEL CLAUDE_CODE_BG_CLASSIFIER_MODEL CLAUDE_CONTEXT_COLLAPSE_MODEL; do
   [ -n "${!v:-}" ] || export "$v=$MODEL"
 done
 # Permission mode: the deterministic guard in hook-audit.py is the gate in every mode; auto
 # mode's classifier would cost a ~35K-token prompt per evaluated tool call on the single slot.
 case " $* " in
   *" --permission-mode"*|*" --dangerously-skip-permissions "*) : ;;    # the caller's choice wins
-  *) [ "$PERMISSION_MODE" = auto ] && warn "CLAUDE_LOCAL_PERMISSION_MODE=auto: the classifier will run a ~35K-token prompt on the slot for every tool call it evaluates"
+  *) [ "$PERMISSION_MODE" = auto ] && warn "CLAUDE_LOCAL_PERMISSION_MODE=auto: settings.json sets permissions.disableAutoMode, so Claude Code ignores this and starts without auto mode (its classifier would cost a ~35K-token prompt per tool call on the slot)"
      CLAUDE_FLAGS+=(--permission-mode "$PERMISSION_MODE") ;;
 esac
 export ANTHROPIC_BASE_URL="$CLAUDE_BASE_URL"

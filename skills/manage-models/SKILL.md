@@ -29,7 +29,7 @@ The interactive picker reads the backend inventory and shows load state:
 ```bash
 CLAUDE_LOCAL_MODEL="" MODELS_JSON_PATH=$(mktemp) \
   LOADED_MODELS="$(curl -sf http://localhost:$PORT/api/ps | jq -r '[.models[].name] | join(",")')" \
-  python3 ~/.claude-local/config/picker.py
+  python3 ~/.claude-local/picker.py      # the installed path: a symlink into the checkout's config/ directory
 ```
 
 Output format: `[LOADED]` = in memory right now, `[idle]` = installed but not loaded.
@@ -172,7 +172,7 @@ done
 
 ## Known model behaviors
 
-- **Qwen3.6 sampling**: The model card and Unsloth recommend temp=0.7, top_p=0.8, top_k=20, min_p=0, presence_penalty=1.5. These are pinned in `LLAMA_EXTRA_ARGS` since Claude Code sends no sampling params by default.
+- **Qwen3.6 sampling**: The model card and Unsloth recommend temp=0.7, top_p=0.8, top_k=20, min_p=0, presence_penalty=1.5. These sit in the `[*]` section of `~/.claude-local/llama-models.ini` since Claude Code sends no sampling params by default; `LLAMA_EXTRA_ARGS` stays empty in router mode because CLI args beat preset keys for every instance.
 - **Thinking mode**: per preset, `reasoning = off` (Qwen3.6, bench winner) or `reasoning = on` (Qwen3.8 presets). Thinking increases output tokens significantly and slows turns. The old `LLAMA_ARG_CHAT_TEMPLATE_KWARGS='{"enable_thinking":...}'` form is deprecated in llama.cpp.
 - **MTP (multi-token prediction)**: The Qwen3.6 GGUF and every unsloth Qwen3.8 quant carry an embedded draft head (`nextn` tensors). `spec-type = draft-mtp` uses it without a separate draft file; on the dense Qwen3.8 it is worth 2.5x decode (n-max 4). The Qwen3-0.6B draft cannot pair with Qwen3.8 (248K vs 152K vocabulary).
 - **Qwen3.8 chat template**: raises "System message must be at the beginning" on a mid-conversation system message. Claude Code sends one (the Agent tool's type list) whenever Agent is in `--tools`; the usage proxy folds it into the system prompt, so keep `CLAUDE_LOCAL_PROXY=1` with Qwen3.8.

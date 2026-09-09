@@ -17,7 +17,8 @@ Env: PROXY_PORT (first port to try, default 1235; PROXY_PORT_FILE receives the b
      USAGE_LOG (default ~/.claude-local/usage.jsonl),
      PROXY_DEBUG=1 adds the request's sampling params / tool count / system size to each row,
      PROXY_DEBUG=2 (or PROXY_DUMP=1) also writes every Messages request body to <session>/requests/,
-     PROXY_SAMPLING='{...}' overrides temperature/top_p/top_k on every Messages request
+     PROXY_SAMPLING='{...}' overrides temperature/top_p/top_k on every Messages request,
+     PROXY_SESSION_MODEL (the launch model) is where a claude-* model name is sent until a turn has named a local model
 
 Errors and anomalies (clog.py, events.jsonl in the session dir and in ~/.claude-local/logs):
   * every non-200 turn: turn_failed {status, err_class, err_msg, model, msgs, tools, prompt_est}
@@ -31,8 +32,13 @@ Errors and anomalies (clog.py, events.jsonl in the session dir and in ~/.claude-
     slow_decode (out_tps < PROXY_WARN_TPS with >= 50 output tokens), empty_output
   * retry_storm: >= 3 failed turns inside 60 s (Claude Code is in its retry loop)
 
-One request rewrite is always on: any `role: system` entry inside `messages` is
-moved into the top-level `system` blocks (see fold_system_messages).
+Two request rewrites are always on: any `role: system` entry inside `messages` is
+moved into the top-level `system` blocks and Claude Code's per-turn <total_tokens>
+counter is stripped wherever it appears (see fold_system_messages); a hosted model name
+(claude-*: the auto-mode classifier, a subagent's model alias, context collapse) is
+replaced by the session's current model, the last model a turn used, else
+PROXY_SESSION_MODEL, and logged as model_rewritten. Any other name passes through, so
+a removed preset still fails as model_not_found.
 
 Checkpoint and resume (llama-server router mode, PROXY_BACKEND=llamaserver):
   * PROXY_CHECKPOINT_S seconds after a turn completes with nothing in flight, the
@@ -89,6 +95,9 @@ HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authoriza
               "te", "trailers", "transfer-encoding", "upgrade", "content-length"}
 
 BACKEND = os.environ.get("PROXY_BACKEND", "ollama")
+# The launch model, set by the launcher: where a hosted model name (claude-*) is sent until
+# the first turn names a local model (see Handler._proxy).
+SESSION_MODEL = os.environ.get("PROXY_SESSION_MODEL") or None
 CHECKPOINT_S = float(os.environ.get("PROXY_CHECKPOINT_S") or 0)
 IDLE_UNLOAD_S = float(os.environ.get("PROXY_IDLE_UNLOAD_S") or 0)
 STATE_DIR = os.environ.get("PROXY_STATE_DIR") or os.path.dirname(os.path.abspath(USAGE_LOG))
@@ -122,7 +131,7 @@ _warm = threading.Lock()       # one ensure_warm at a time (parallel subagents s
 _inflight = 0
 _dirty = {}                    # model -> time its last turn completed (checkpoint pending)
 _instance = {}                 # model -> child port last seen (changes when the instance restarts)
-_current = None                # model this session's last turn used: never idle-unloaded by us
+_current = None                # model this session's last turn used: never idle-unloaded by us; where claude-* names go
 _first_seen = {}               # model -> when we first saw it resident without a ledger entry
 LEDGER = os.path.join(STATE_DIR, "last_use.json")
 
@@ -390,6 +399,9 @@ def fold_system_messages(req: dict) -> bool:
                 m["content"] = kept_blocks
                 changed = True
                 strip_volatile("<total_tokens>")   # counts and logs once
+        elif isinstance(c, str) and "<total_tokens>" in c:     # inline in a plain-string message
+            m["content"] = strip_volatile(c)                     # the text around it stays; never drop the message
+            changed = True
     if not any(isinstance(m, dict) and m.get("role") == "system" for m in msgs):
         return changed
     system = req.get("system")
@@ -431,6 +443,11 @@ def strip_volatile(text):
               hint="Claude Code sent its per-turn <total_tokens> reminder; stripped so the prefix cache survives. "
                    "Set CLAUDE_CODE_TOTAL_TOKENS_REMINDER=0 (the launcher does) to stop it at the source.")
     return out
+
+
+def hosted(name):
+    """True for an Anthropic model name (claude-*): only a Claude Code feature asks for one here."""
+    return isinstance(name, str) and name.lower().startswith("claude-")
 
 
 # ------------------------------------------------------------ request fingerprints ----
@@ -710,6 +727,24 @@ class Handler(BaseHTTPRequestHandler):
                 if SAMPLING and isinstance(req, dict):
                     req.update(SAMPLING)
                     changed = True
+                if hosted(req_model):
+                    # Only a Claude Code feature asks for a hosted model: the auto-mode classifier
+                    # (2026-09-08: "claude-sonnet-5" with a 35K-token prompt, HTTP 400 from the router,
+                    # then the same prompt retried on the local slot), a subagent's model alias, context
+                    # collapse. Run it on the session's current model: the last local model a turn used
+                    # (follows /model), else the launch model. Any other unknown name is left alone so a
+                    # removed preset still fails loudly as model_not_found. Before fingerprint(), so the
+                    # turn keeps its conversation id and the usage row names the model that ran it.
+                    target = _current if _current and not hosted(_current) else SESSION_MODEL
+                    if target:
+                        event("model_rewritten", "info", **{"from": req_model}, to=target,
+                              msgs=len(req.get("messages") or []),
+                              hint="a Claude Code feature (auto-mode classifier, a subagent's model alias, "
+                                   "context collapse) asked for a hosted model; the proxy ran it on the session "
+                                   "model instead. The launcher pins the aliases so this should be rare; "
+                                   "CLAUDE_LOCAL_PROXY_DEBUG=2 dumps the request")
+                        req["model"] = req_model = target
+                        changed = True
                 if changed:
                     body = json.dumps(req).encode()
             except ValueError:

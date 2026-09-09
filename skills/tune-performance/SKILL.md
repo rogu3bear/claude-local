@@ -53,7 +53,7 @@ The statusline also shows context pressure (the gauge bar), thinking state, and 
    ```bash
    # The launcher should use --exclude-dynamic-system-prompt-sections
    # This prevents git status from changing the prompt each turn
-   grep 'exclude-dynamic' ~/.claude-local/bin/claude-local
+   grep 'exclude-dynamic' ~/.local/bin/claude-local   # the launcher: a symlink into the checkout (bin/claude-local under ~/dev/claude-local)
    ```
    If missing, every turn gets a different system prompt (git dirty state changes), causing 100% cache miss.
 
@@ -141,10 +141,16 @@ Keep q8_0 unless moving to different hardware where memory bandwidth isn't the b
 
 ### Disable speculative decoding on iGPU
 
-On this Ryzen AI MAX+ iGPU, speculative decoding **loses on the MoE** (Qwen3-Coder-30B-A3B, 2026-09-05) despite 55% draft acceptance — a batched verify activates more experts, so it costs more than the tokens it saves. On a **dense** model it is the opposite: decode is bound by weight bandwidth and a verify of 4 tokens reads the weights once, so Qwen3.8-27B goes 7.7 -> 19.2 tok/s with `spec-type = draft-mtp`, `spec-draft-n-max = 4` (2026-09-07). Speculation is per preset in `llama-models.ini`:
+On this Ryzen AI MAX+ iGPU, speculative decoding **loses on the MoE** (Qwen3-Coder-30B-A3B, 2026-09-05) despite 55% draft acceptance: a batched verify activates more experts, so it costs more than the tokens it saves. On a **dense** model it is the opposite: decode is bound by weight bandwidth and a verify of 4 tokens reads the weights once, so Qwen3.8-27B goes 7.7 -> 19.2 tok/s with `spec-type = draft-mtp`, `spec-draft-n-max = 4` (2026-09-07). Speculation is the `spec-type` key of the preset's section in `~/.claude-local/llama-models.ini` (not an env var: `LLAMA_EXTRA_ARGS` would override every preset). To disable it for one preset, comment the key out there and reload the router:
+```ini
+[qwen3.8-27b]
+model = /home/mln-dev/.claude-local/models/Qwen3.8-27B-Q8_0.gguf
+reasoning = on
+;spec-type = draft-mtp
+;spec-draft-n-max = 4
+```
 ```bash
-# Disable: comment out or remove
-# LLAMA_ARG_SPEC_TYPE=draft-mtp
+curl -s 'http://127.0.0.1:1244/models?reload=1' >/dev/null   # re-read the INI; a loaded model whose section changed is unloaded
 ```
 
 ## Step 5: Run a benchmark to compare
@@ -202,4 +208,4 @@ for f in /sys/class/drm/card*/device/temp; do [ -r "$f" ] && echo "$(basename $(
 | Server fit (128K, q8_0 KV) | 42s → 31s | 90% → 98% | Reduces model memory 45.6GB → 26.1GB |
 | Compact prompt (replace mode) | ~22s | 99% | Slightly lower pass rate (88% vs 100%) |
 | Q8 weights | 31s → 35.9s | 98% → 98% | No accuracy gain, slower decode on iGPU |
-| Speculative decoding (iGPU) | worse | N/A | Loses on this hardware; may help on discrete GPU |
+| Speculative decoding (iGPU) | MoE: worse (Qwen3-Coder, 2026-09-05); dense Qwen3.8-27B: 7.7 -> 19.2 tok/s decode with `draft-mtp` n-max 4 (2026-09-07) | N/A | Per preset (`spec-type` in `llama-models.ini`); speculate on dense models, measure on MoE |

@@ -15,7 +15,8 @@
     "allow": [
       "mcp__websearch__web_search",
       "WebFetch"
-    ]
+    ],
+    "disableAutoMode": "disable"
   },
   "hooks": {
     "PreToolUse": [

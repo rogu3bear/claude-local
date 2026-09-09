@@ -1,14 +1,15 @@
-.PHONY: bootstrap install check check-llama check-checkpoint check-idle check-interactive check-prefix check-guard test doctor drain-status bench bench-shipped compare lint
+.PHONY: bootstrap install check check-llama check-checkpoint check-idle check-interactive check-prefix check-guard test doctor drain-status clean-transcripts bench bench-shipped compare lint
 # The launcher's default --tools list, read from the one place it is defined.
 SHIPPED_TOOLS = $(shell sed -n 's/^TOOLS="$${CLAUDE_LOCAL_TOOLS-\(.*\)}"$$/\1/p' bin/claude-local)
 bootstrap:          ## fresh machine -> working claude-local; flags via ARGS='--gpu cpu --dry-run'
 	./bootstrap.sh $(ARGS)
 install:            ## symlink into ~/.local/bin and ~/.claude-local
 	./install.sh
-lint:               ## syntax-check every script
-	bash -n bootstrap.sh bin/claude-local bin/llama-server-run bin/llama-models-ini config/backend-ollama.sh config/backend-llamaserver.sh config/statusline.sh bench/run.sh test/smoke.sh test/checkpoint.sh test/idle-unload.sh install.sh
+lint:               ## syntax-check every script; no commit message in the history may credit an AI tool as an author
+	bash -n bootstrap.sh bin/claude-local bin/llama-server-run bin/llama-models-ini config/backend-ollama.sh config/backend-llamaserver.sh config/statusline.sh bench/run.sh test/smoke.sh test/checkpoint.sh test/idle-unload.sh install.sh scripts/contracts/check_no_ai_attribution.sh .githooks/commit-msg
 	python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" config/picker.py config/proxy.py config/clog.py config/mcp-websearch.py config/hook-urlguard.py config/hook-audit.py bin/claude-local-doctor bin/claude-local-drain bench/compare.py test/interactive.py test/proxy_events.py test/hook_audit.py test/stub_upstream.py test/prefix.py test/drain.py test/urlguard.py test/guard_mode.py test/launcher.py
 	python3 -c "import json,sys; json.load(open('config/settings.json'))"
+	scripts/contracts/check_no_ai_attribution.sh --log
 	@echo lint ok
 test: lint          ## offline tests, no model server: proxy error/anomaly events, hook guards, URL guard, drain, launcher flags (~15s)
 	python3 test/proxy_events.py
@@ -24,6 +25,11 @@ doctor:             ## read-only diagnosis: install, server, GPU/memory, session
 	bin/claude-local-doctor $(ARGS)
 drain-status:       ## what is resident, who uses it, and what the drain timer would unload now
 	bin/claude-local-drain --status
+clean-transcripts:  ## delete Claude Code's transcripts of bench scratch repos and /tmp test dirs (projects/-tmp-*, *-claude-local-bench-work-*), nothing else
+	@d="$${CLAUDE_LOCAL_CONFIG:-$$HOME/.claude-local}/projects"; n=0; kb=0; \
+	for p in "$$d"/-tmp-* "$$d"/*-claude-local-bench-work-*; do \
+	  [ -d "$$p" ] || continue; kb=$$((kb + $$(du -sk "$$p" | cut -f1))); rm -rf "$$p"; n=$$((n + 1)); \
+	done; echo "clean-transcripts: removed $$n transcript dirs, $$((kb / 1024)) MB freed under $$d"
 check: test         ## offline tests + one non-interactive turn through launcher and proxy (needs the model server)
 	test/smoke.sh
 check-llama: lint   ## same, against llama-server.service (port from ~/.claude-local/env)

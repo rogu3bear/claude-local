@@ -4,8 +4,10 @@ Claude Code: test/stub_upstream.py plays the llama-server router (one loaded pre
 `claude` on PATH records its argv and environment and exits, and the launcher runs end to end (server
 check, picker via CLAUDE_LOCAL_MODEL, context probe, system prompt, MCP config, proxy, flags, post-exit
 menu on a closed stdin, archive). Asserts: autocompact fitted to the server context, the tool list,
---permission-mode acceptEdits by default and the caller's own mode winning, every model alias pinned
-to the session model, the proxy URL in --settings and the environment, the cache-hygiene env, the
+--permission-mode acceptEdits by default and the caller's own mode winning, the six model aliases pinned
+to the session model with CLAUDE_CODE_SUBAGENT_MODEL left unset (subagents follow /model), a claude-*
+model name sent by the fake claude rewritten to the session model by the launcher-started proxy
+(model_rewritten), the proxy URL in --settings and the environment, the cache-hygiene env, the
 session archive with its session_start event, and that a stale run dir left by a killed launcher is
 archived (session_reaped) before it is reaped. ~5 s."""
 import glob
@@ -60,7 +62,17 @@ open(os.path.join(sd, "session_model"), "w").write("stub")
 open(os.path.join(sd, "usage.jsonl"), "w").write('{"ts": 1, "model": "stub", "prompt": 10}\n')
 fake_bin = os.path.join(tmp, "bin"); os.makedirs(fake_bin)
 out_dir = os.path.join(tmp, "fake"); os.makedirs(out_dir)
-open(os.path.join(fake_bin, "claude"), "w").write('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$FAKE_OUT/argv"\nenv > "$FAKE_OUT/env"\necho \'{"result":"FAKEOK"}\'\n')
+# The fake claude records its argv and environment, then sends one turn through the proxy asking for a
+# hosted model name (what the auto-mode classifier did on 2026-09-08): the launcher-started proxy must
+# run it on the session model.
+open(os.path.join(fake_bin, "claude"), "w").write('''#!/usr/bin/env bash
+printf "%s\\n" "$@" > "$FAKE_OUT/argv"
+env > "$FAKE_OUT/env"
+curl -s --max-time 30 -o /dev/null -w '%{http_code}' -H 'content-type: application/json' \\
+  -d '{"model":"claude-sonnet-5","max_tokens":8,"stream":false,"system":"fake","messages":[{"role":"user","content":"classify"}]}' \\
+  "$ANTHROPIC_BASE_URL/v1/messages" > "$FAKE_OUT/turn_status" 2>/dev/null || true
+echo '{"result":"FAKEOK"}'
+''')
 os.chmod(os.path.join(fake_bin, "claude"), 0o755)
 launcher = open(os.path.join(REPO, "bin", "claude-local")).read()
 tools = re.search(r'^TOOLS="\$\{CLAUDE_LOCAL_TOOLS-(.*)\}"$', launcher, re.M).group(1)
@@ -92,10 +104,11 @@ settings = json.loads(flag("--settings") or "{}")
 proxy_url = (settings.get("env") or {}).get("ANTHROPIC_BASE_URL", "")
 check(re.fullmatch(r"http://localhost:13[3-4][0-9]", proxy_url or "") is not None, f"--settings points at the proxy ({proxy_url})")
 check(fenv.get("ANTHROPIC_BASE_URL") == proxy_url, "ANTHROPIC_BASE_URL in the environment is the proxy too")
-aliases = ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
+aliases = ["ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
            "CLAUDE_CODE_AUTO_MODE_MODEL", "CLAUDE_CODE_BG_CLASSIFIER_MODEL", "CLAUDE_CONTEXT_COLLAPSE_MODEL"]
 bad = [a for a in aliases if fenv.get(a) != "stub"]
-check(not bad, f"every model alias pinned to the session model ({bad or 'all 7'})")
+check(not bad, f"every model alias pinned to the session model ({bad or 'all 6'})")
+check("CLAUDE_CODE_SUBAGENT_MODEL" not in fenv, f"CLAUDE_CODE_SUBAGENT_MODEL left unset so subagents follow /model ({fenv.get('CLAUDE_CODE_SUBAGENT_MODEL', 'absent')})")
 check(fenv.get("CLAUDE_CODE_TOTAL_TOKENS_REMINDER") == "off" and fenv.get("CLAUDE_CODE_ATTRIBUTION_HEADER") == "0", "cache hygiene env: total-tokens reminder off, attribution header off")
 check(fenv.get("CLAUDE_CONFIG_DIR") == cfg and fenv.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS") == "16384" and fenv.get("CLAUDE_LOCAL_PERMISSION_MODE") == "acceptEdits",
       "isolated config dir, max output and permission mode exported")
@@ -104,6 +117,12 @@ check("mode=acceptEdits" in r.stderr and "autocompact=112640" in r.stderr, "bann
 check(not os.path.exists(sd) and glob.glob(os.path.join(logs, "sessions", f"*-{stale}")), "stale run dir archived, then reaped")
 evs = [json.loads(l) for l in open(os.path.join(logs, "events.jsonl"))]
 check(any(e["kind"] == "session_reaped" and e.get("pid") == stale for e in evs), "session_reaped event for the killed launcher")
+# the fake claude's turn asked for claude-sonnet-5: the launcher-started proxy ran it on the session model
+status = open(os.path.join(out_dir, "turn_status")).read() if os.path.exists(os.path.join(out_dir, "turn_status")) else ""
+sent = [json.loads(l)["body"] for l in open(os.path.join(tmp, "req.jsonl")) if '"/v1/messages' in l]
+rw = [e for e in evs if e["kind"] == "model_rewritten"]
+check(status == "200" and bool(sent) and sent[-1].get("model") == "stub" and any(e.get("from") == "claude-sonnet-5" and e.get("to") == "stub" for e in rw),
+      f"a claude-* model name is run on the session model by the launcher-started proxy (status {status!r}, stub saw {(sent[-1].get('model') if sent else None)!r}, model_rewritten events {len(rw)})")
 live = [d for d in os.listdir(os.path.join(cfg, "run")) if d.isdigit()]
 arch = glob.glob(os.path.join(logs, "sessions", f"*-{live[0]}")) if len(live) == 1 else []
 check(bool(arch) and os.path.exists(os.path.join(arch[0], "events.jsonl")), "this session's files archived at exit")

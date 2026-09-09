@@ -5,7 +5,11 @@ Runs test/stub_upstream.py, puts config/proxy.py in front of it, drives a script
 Messages requests through the proxy and asserts the events that events.jsonl must contain:
 turn_failed (template / model_not_found / context), retry_storm, stream_incomplete,
 output_truncated, cache_miss with the right `div`, conv_switch, client_abort,
-upstream_unreachable, plus a usage row per successful turn. ~5 s.
+upstream_unreachable, plus a usage row per successful turn; and the request rewrites the
+stub must see: role:system messages folded, the <total_tokens> counter stripped (as a system
+message, a user text block, inline in a plain-string user message), a claude-* model name
+replaced by the session model (model_rewritten) while an unknown local name ("nope") still
+fails as model_not_found. ~5 s.
 """
 import http.client
 import json
@@ -150,6 +154,22 @@ try:
     st, _ = turn(px, conv_d); check(st == 200, "user-block variant ok")
     sent = [json.loads(l)["body"] for l in open(os.path.join(tmp, "stub-requests.jsonl")) if '"/v1/messages' in l][-1]
     check("total_tokens" not in json.dumps(sent) and len(sent["messages"][0]["content"]) == 1, "volatile user text block dropped")
+    # 8c. a hosted model name (what the auto-mode classifier sent on 2026-09-08) on conversation A: run on the
+    # session model, still conversation A (the conv id is hashed from the rewritten name), one model_rewritten event
+    conv_a8 = conv_a7 + [{"role": "assistant", "content": "STUBOK"}, {"role": "user", "content": "classify this"}]
+    st, _ = turn(px, conv_a8, model="claude-sonnet-5", system="You are a test. NOW", tools=tools); check(st == 200, "claude-* turn ok")
+    sent = [json.loads(l)["body"] for l in open(os.path.join(tmp, "stub-requests.jsonl")) if '"/v1/messages' in l][-1]
+    rw = [e for e in events() if e["kind"] == "model_rewritten"]
+    check(sent.get("model") == "stub" and len(rw) == 1 and rw[0].get("from") == "claude-sonnet-5" and rw[0].get("to") == "stub" and bool(rw[0].get("hint")),
+          f"claude-sonnet-5 rewritten to the session model (stub saw {sent.get('model')!r}; events {[(e.get('from'), e.get('to')) for e in rw]})")
+    urows = [json.loads(l) for l in open(os.path.join(sess, "usage.jsonl"))]
+    check(urows[-1]["model"] == "stub" and urows[-1]["conv"] == urows[0]["conv"],
+          f"rewritten turn keeps conversation A's id (model {urows[-1]['model']}, conv {urows[-1]['conv']} vs {urows[0]['conv']})")
+    # 8d. the counter inline in a plain-string user message: stripped, the message kept
+    st, _ = turn(px, [{"role": "user", "content": "hello <total_tokens>5 tokens left</total_tokens> there"}]); check(st == 200, "plain-string variant ok")
+    sent = [json.loads(l)["body"] for l in open(os.path.join(tmp, "stub-requests.jsonl")) if '"/v1/messages' in l][-1]
+    c = sent["messages"][-1].get("content")
+    check("total_tokens" not in json.dumps(sent) and isinstance(c, str) and c.split() == ["hello", "there"], f"volatile block stripped from a plain-string user message ({c!r})")
     # 9. max_tokens
     st, _ = turn(px, [{"role": "user", "content": "stub:maxtok"}]); check("output_truncated" in kinds(), "output_truncated logged")
     # 10. errors: 500 template, 404 model, 400 context -> 3 turn_failed + retry_storm

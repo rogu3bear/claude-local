@@ -5,8 +5,20 @@
 #   ./bootstrap.sh [--dry-run] [--no-smoke] [--model NAME] [--port N]
 #                  [--gpu amd-vulkan|amd-rocm|nvidia|cpu]   (default amd-vulkan)
 #                  [--backend ollama|llamaserver]           (default ollama)
-#                  [--llama-cpp DIR] [--device Vulkan0|ROCm0] [--llama-port N]
-#                  [--model-gguf PATH] [--draft URL|PATH|none|default]  (default none)
+#                  [--llama-cpp DIR] [--device auto|ROCm0|Vulkan0] [--llama-port N]
+#                  [--hf URL|OWNER/REPO/FILE.gguf] [--sha256 HEX] [--model-gguf PATH]
+#                  [--draft URL|PATH|none|default]  (default none)
+#
+# Recommended on Strix Halo (gfx1151): llama-server with the Qwen3.6-35B-A3B MTP quant, the
+# 2026-09-06 overnight winner (27/27, 12.3 s/task vs 21.4 s for Ollama + qwen3-coder:30b):
+#   ./bootstrap.sh --backend llamaserver \
+#     --hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+#     --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 \
+#     --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+#   --model-gguf names the download: unsloth's non-MTP repo ships a different file under the
+#   same name (22360456160 bytes), and the [qwen3.6-35b] preset in
+#   config/llama-models.ini.example (reasoning off, draft-mtp) expects the -MTP name.
+#   URL, size (22853663008 bytes) and sha256 verified against huggingface.co on 2026-09-08.
 #
 # Steps (each idempotent; re-running is safe and does not restart a healthy server):
 #   1. deps      git curl jq python3 systemd tar zstd; node+npm (nvm if absent); claude CLI
@@ -15,41 +27,69 @@
 #   3. service   ~/.config/systemd/user/ollama.service (generic) + drop-ins
 #                10-claude-local.conf (context/KV/slots/flash attention) and
 #                20-gpu.conf (profile); an existing unit is adopted, not overwritten
-#   4. model     pull MODEL if not present
+#   4. model     pull MODEL if not present. With --backend llamaserver and a GGUF from
+#                --hf (curl into ~/.claude-local/models: resumable .part file, "GGUF"
+#                magic and --sha256 checked, skipped when the file is already there)
+#                or --model-gguf, the Ollama pull is skipped and the Ollama manifest is
+#                left alone; Ollama stays installed as the fallback backend
 #   5. harness   ./install.sh (symlinks, drop-ins, ~/.local/bin/ollama wrapper);
 #                server restarted only if the live process lacks the drop-in env
 #   6. smoke     one turn through launcher and proxy
-#   With --backend llamaserver an extra step installs llama-server.service (port 1244)
+#   With --backend llamaserver an extra step 4b installs llama-server.service (port 1244)
 #   from an existing upstream llama.cpp build (--llama-cpp DIR, default ~/ai/llama.cpp;
-#   the build recipe is printed if the binary is missing), resolves the GGUF from the
-#   Ollama manifest, optionally downloads a draft model (--draft default), writes
-#   ~/.claude-local/llama-server.env (adopted if present) and starts the unit.
-#   Ollama stays installed and untouched as the fallback.
+#   the build recipe is printed if the binary is missing). --device auto (the default)
+#   takes ROCm0 when build-hip/bin/llama-server --list-devices shows it (ROCm prefills
+#   1.3-1.6x faster than Vulkan at equal decode on gfx1151, measured 2026-09-07), else
+#   Vulkan0 when build-vulkan exists; an explicit --device wins. The GGUF comes from --hf,
+#   --model-gguf or, failing both, the Ollama manifest of MODEL (a plain Q4_K_M without
+#   the MTP head). A draft model is optional (--draft default). llama-server.env and
+#   llama-models.ini are written from config/*.example (adopted if present; a preset
+#   section is appended for a GGUF the INI lacks) and the unit is started. Without
+#   --model, MODEL becomes the INI alias of the GGUF (the section that names it, or the
+#   lower-cased file stem of a new section), which is what the launcher expects.
 #
 # No sudo. Missing apt packages are reported with the command, and the script
 # stops. Any failed step stops the script. Downloads: Ollama ~1.5GB
-# (+ ~2GB for amd-rocm), model ~18GB.
+# (+ ~2GB for amd-rocm), model ~18GB (Ollama pull) or ~23GB (the recommended GGUF).
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CONFIG="${CLAUDE_LOCAL_CONFIG:-$HOME/.claude-local}"
 [ -r "$CONFIG/env" ] && . "$CONFIG/env"
 MODEL="${CLAUDE_LOCAL_MODEL:-qwen3-coder:30b}"; PORT="${CLAUDE_LOCAL_PORT:-1234}"; PORT_EXPLICIT=0
+MODEL_EXPLICIT=0; [ -n "${CLAUDE_LOCAL_MODEL:-}" ] && MODEL_EXPLICIT=1   # a chosen name is never replaced by the GGUF alias
 GPU="amd-vulkan"; DRY=0; SMOKE=1
-BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"; LLAMA_CPP_DIR="$HOME/ai/llama.cpp"; LLAMA_DEVICE="Vulkan0"; LLAMA_PORT="${CLAUDE_LOCAL_LLAMASERVER_PORT:-1244}"
-MODEL_GGUF=""; DRAFT="none"; DRAFT_SIZE=639446688   # speculative decoding measured slower on gfx1151; opt in with --draft URL
+BACKEND="${CLAUDE_LOCAL_BACKEND:-ollama}"; LLAMA_CPP_DIR="$HOME/ai/llama.cpp"; LLAMA_DEVICE="auto"; LLAMA_PORT="${CLAUDE_LOCAL_LLAMASERVER_PORT:-1244}"
+MODEL_GGUF=""; HF=""; HF_URL=""; SHA256=""; DRAFT="none"; DRAFT_SIZE=639446688   # speculative decoding measured slower on gfx1151; opt in with --draft URL
 DRAFT_DEFAULT_URL="https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf"
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1;; --no-smoke) SMOKE=0;;
-    --model) MODEL=$2; shift;; --port) PORT=$2; PORT_EXPLICIT=1; shift;; --gpu) GPU=$2; shift;;
+    --model) MODEL=$2; MODEL_EXPLICIT=1; shift;; --port) PORT=$2; PORT_EXPLICIT=1; shift;; --gpu) GPU=$2; shift;;
     --backend) BACKEND=$2; shift;; --llama-cpp) LLAMA_CPP_DIR=$2; shift;; --device) LLAMA_DEVICE=$2; shift;;
     --llama-port) LLAMA_PORT=$2; shift;; --model-gguf) MODEL_GGUF=$2; shift;; --draft) DRAFT=$2; [ "$DRAFT" = default ] && DRAFT="$DRAFT_DEFAULT_URL"; shift;;
+    --hf) HF=$2; shift;; --sha256) SHA256=$2; shift;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown option $1" >&2; exit 2;;
   esac; shift
 done
 [ -f "$HERE/systemd/20-gpu-$GPU.conf" ] || { echo "unknown --gpu $GPU (amd-vulkan|amd-rocm|nvidia|cpu)" >&2; exit 2; }
 case "$BACKEND" in ollama|llamaserver) ;; *) echo "unknown --backend $BACKEND (ollama|llamaserver)" >&2; exit 2;; esac
+case "$LLAMA_DEVICE" in auto|ROCm*|Vulkan*) ;; *) echo "unknown --device $LLAMA_DEVICE (auto|ROCm0|Vulkan0)" >&2; exit 2;; esac
+if [ -n "$HF" ]; then
+  [ "$BACKEND" = llamaserver ] || { echo "--hf downloads a GGUF for llama-server; add --backend llamaserver" >&2; exit 2; }
+  case "$HF" in
+    http://*|https://*) HF_URL="$HF";;
+    */*/*) hf_rest=${HF#*/}; HF_URL="https://huggingface.co/${HF%%/*}/${hf_rest%%/*}/resolve/main/${hf_rest#*/}";;
+    *) echo "--hf expects https://huggingface.co/OWNER/REPO/resolve/main/FILE.gguf or OWNER/REPO/FILE.gguf" >&2; exit 2;;
+  esac
+  [ -n "$MODEL_GGUF" ] || MODEL_GGUF="$CONFIG/models/$(basename "${HF_URL%%\?*}")"   # --model-gguf PATH names the download
+fi
+if [ -n "$SHA256" ]; then
+  [ -n "$MODEL_GGUF" ] || { echo "--sha256 verifies a GGUF from --hf or --model-gguf" >&2; exit 2; }
+  printf '%s' "$SHA256" | grep -qiE '^[0-9a-f]{64}$' || { echo "--sha256 expects 64 hex characters" >&2; exit 2; }
+  SHA256=$(printf '%s' "$SHA256" | tr 'A-F' 'a-f')
+fi
+case "$MODEL_GGUF" in ""|/*) ;; *) MODEL_GGUF="$PWD/$MODEL_GGUF";; esac   # the INI and the unit need an absolute path
 USER_NAME="${USER:-$(id -un)}"
 # systemctl --user needs the user manager's runtime dir; cron/containers/env -i lack it.
 [ -n "${XDG_RUNTIME_DIR:-}" ] || { [ -d "/run/user/$(id -u)" ] && export XDG_RUNTIME_DIR="/run/user/$(id -u)"; }
@@ -179,17 +219,73 @@ EOF2
 }
 if [ "$DRY" = 1 ]; then echo "  would write: $CONFIG/env (ollama=$PORT llamaserver=$LLAMA_PORT default backend=$BACKEND)" >&2
 else write_env_file; fi
+[ "$BACKEND" = llamaserver ] || warn "config/settings.json pins ANTHROPIC_BASE_URL to the llama-server port ($LLAMA_PORT), so a bare 'claude' with this config dir fails to connect by design (it never reaches Anthropic's API); start sessions with claude-local, which sets the Ollama port itself"
 export OLLAMA_HOST="127.0.0.1:${PORT}"
 
 # --------------------------------------------------------------- 4. model ----
-step "4/6 model $MODEL"
-if "$OLLAMA" show "$MODEL" >/dev/null 2>&1; then say "present"
-else say "pulling $MODEL (large download)"; run "$OLLAMA" pull "$MODEL"; fi
+# A GGUF named on the command line (--hf, --model-gguf) is what llama-server serves, so
+# the Ollama pull is skipped: the Ollama blob of qwen3.6 is a plain Q4_K_M without the
+# MTP head, not the file the 2026-09-06 bench won with. Ollama stays installed as the
+# fallback backend. Downloads go through a .part file so a partial file is never served.
+gb() { awk -v b="$1" 'BEGIN{printf "%.1f GB", b/1e9}'; }
+remote_size() { curl -sIL --max-time 30 "$1" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:"{s=$2} END{print s}'; }
+check_gguf() { # "GGUF" magic always; sha256 when --sha256 was given (real runs only: 22GB hashes in about a minute)
+  [ "$(head -c 4 "$1" 2>/dev/null)" = GGUF ] || die "not a GGUF file (first bytes are not GGUF): $1; remove it and rerun"
+  [ -n "$SHA256" ] || return 0
+  if [ "$DRY" = 1 ]; then echo "  would verify sha256 of $1" >&2; return 0; fi
+  say "verifying sha256 of $(basename "$1") ($(gb "$(stat -c %s "$1")"))"
+  local got; got=$(sha256sum "$1" | cut -d' ' -f1)
+  [ "$got" = "$SHA256" ] || die "sha256 mismatch for $1: got $got, expected $SHA256; remove the file and rerun"
+}
+fetch_gguf() { # $HF_URL -> $MODEL_GGUF; resumable (curl -C - on the .part file), skipped when the file is already there
+  local dest="$MODEL_GGUF" part="$MODEL_GGUF.part" want have size_str resume=""
+  want=$(remote_size "$HF_URL")
+  if [ -n "$want" ]; then size_str=$(gb "$want"); else size_str="size unknown"; warn "could not read the size of $HF_URL (offline?); the size check is skipped"; fi
+  if [ -f "$dest" ]; then
+    have=$(stat -c %s "$dest")
+    [ -z "$want" ] || [ "$have" = "$want" ] || die "$dest exists with $have bytes, expected $want; remove it or pass --model-gguf PATH to save the download elsewhere"
+    say "present: $dest ($(gb "$have"))"; check_gguf "$dest"; return 0
+  fi
+  [ ! -f "$part" ] || resume=" (resuming $part, $(gb "$(stat -c %s "$part")") so far)"
+  if [ "$DRY" = 1 ]; then echo "  would download $HF_URL ($size_str) to $dest${SHA256:+, then verify sha256}$resume" >&2; return 0; fi
+  mkdir -p "$(dirname "$dest")"
+  say "downloading $HF_URL ($size_str) to $dest$resume"
+  if [ -f "$part" ] && [ -n "$want" ] && [ "$(stat -c %s "$part")" = "$want" ]; then say "download already complete: $part"
+  else curl -fL -C - --progress-bar -o "$part" "$HF_URL" || die "download failed; rerun to resume from $part"; fi
+  have=$(stat -c %s "$part")
+  [ -z "$want" ] || [ "$have" = "$want" ] || die "$part has $have bytes, expected $want; rerun to resume"
+  check_gguf "$part"
+  mv "$part" "$dest"; say "downloaded $dest ($(gb "$have"))"
+}
+GGUF_FROM_FLAG=0; [ "$BACKEND" = llamaserver ] && [ -n "$MODEL_GGUF" ] && GGUF_FROM_FLAG=1
+if [ "$GGUF_FROM_FLAG" = 1 ]; then
+  step "4/6 model $(basename "$MODEL_GGUF") (GGUF for llama-server; Ollama pull skipped)"
+  if [ -n "$HF_URL" ]; then fetch_gguf
+  else [ -r "$MODEL_GGUF" ] || die "model GGUF not readable: $MODEL_GGUF"; say "present: $MODEL_GGUF ($(gb "$(stat -c %s "$MODEL_GGUF")"))"; check_gguf "$MODEL_GGUF"; fi
+  say "Ollama pull skipped: llama-server serves this GGUF; Ollama stays installed as the fallback backend (CLAUDE_LOCAL_BACKEND=ollama claude-local)"
+else
+  step "4/6 model $MODEL"
+  if "$OLLAMA" show "$MODEL" >/dev/null 2>&1; then say "present"
+  else say "pulling $MODEL (large download)"; run "$OLLAMA" pull "$MODEL"; fi
+fi
 
 # -------------------------------------------------------- 4b. llama-server ----
 if [ "$BACKEND" = llamaserver ]; then
+  device_why=""
+  if [ "$LLAMA_DEVICE" = auto ]; then
+    # ROCm first: on gfx1151 the HIP build prefills Qwen3.8-27B 1.6x and Qwen3.6-35B 1.3x
+    # faster than Vulkan at equal decode (2026-09-07, bench/results/micro/micro-q38-*.jsonl).
+    if [ -x "$LLAMA_CPP_DIR/build-hip/bin/llama-server" ] && "$LLAMA_CPP_DIR/build-hip/bin/llama-server" --list-devices 2>/dev/null | grep -q '^ *ROCm0:'; then
+      LLAMA_DEVICE=ROCm0; device_why="auto: build-hip lists ROCm0, which prefills 1.3-1.6x faster than Vulkan at equal decode on gfx1151 (2026-09-07)"
+    elif [ -x "$LLAMA_CPP_DIR/build-vulkan/bin/llama-server" ]; then
+      LLAMA_DEVICE=Vulkan0; device_why="auto: build-hip lists no ROCm0, build-vulkan is present"
+    else
+      LLAMA_DEVICE=Vulkan0; device_why="auto: no build under $LLAMA_CPP_DIR yet"
+    fi
+  fi
   step "4b/6 llama-server (upstream llama.cpp, device $LLAMA_DEVICE, port $LLAMA_PORT)"
-  case "$LLAMA_DEVICE" in ROCm*) lbuild=build-hip;; Vulkan*) lbuild=build-vulkan;; *) die "--device must be ROCm0 or Vulkan0";; esac
+  [ -z "$device_why" ] || say "device $LLAMA_DEVICE ($device_why); an explicit --device overrides"
+  case "$LLAMA_DEVICE" in ROCm*) lbuild=build-hip;; Vulkan*) lbuild=build-vulkan;; *) die "--device must be auto, ROCm0 or Vulkan0";; esac
   LBIN="$LLAMA_CPP_DIR/$lbuild/bin/llama-server"
   if [ ! -x "$LBIN" ]; then
     cat >&2 <<EOF2
@@ -207,7 +303,7 @@ EOF2
     [ -f "$mf" ] || die "no Ollama manifest for $MODEL at $mf; pass --model-gguf PATH"
     MODEL_GGUF="$HOME/.ollama/models/blobs/$(jq -r '.layers[]|select(.mediaType=="application/vnd.ollama.image.model").digest' "$mf" | sed 's/:/-/')"
   fi
-  [ -r "$MODEL_GGUF" ] || die "model GGUF not readable: $MODEL_GGUF"
+  if [ ! -r "$MODEL_GGUF" ]; then { [ "$DRY" = 1 ] && [ -n "$HF_URL" ]; } || die "model GGUF not readable: $MODEL_GGUF"; fi
   say "model gguf: $MODEL_GGUF"
   spec_type="draft-simple"; draft_path=""
   case "$DRAFT" in
@@ -224,7 +320,9 @@ EOF2
     *) draft_path="$DRAFT"; [ -r "$draft_path" ] || die "draft model not readable: $draft_path";;
   esac
   run mkdir -p "$CONFIG/slots" "$CONFIG/models"
-  if [ -f "$CONFIG/llama-server.env" ]; then say "present: $CONFIG/llama-server.env (adopted, not overwritten)"
+  if [ -f "$CONFIG/llama-server.env" ]; then
+    env_dev=$(sed -n 's/^LLAMA_DEVICE=//p' "$CONFIG/llama-server.env" | head -1)
+    say "present: $CONFIG/llama-server.env (adopted, not overwritten${env_dev:+; its LLAMA_DEVICE=$env_dev is what the unit runs})"
   elif [ "$DRY" = 1 ]; then echo "  would write: $CONFIG/llama-server.env (device=$LLAMA_DEVICE model=$MODEL_GGUF spec=${spec_type:-off})" >&2
   else
     sed "s|__HOME__|$HOME|g; s|__MODEL_GGUF__|$MODEL_GGUF|g; s|^LLAMA_CPP_DIR=.*|LLAMA_CPP_DIR=$LLAMA_CPP_DIR|; s|^LLAMA_DEVICE=.*|LLAMA_DEVICE=$LLAMA_DEVICE|" "$HERE/config/llama-server.env.example" > "$CONFIG/llama-server.env"
@@ -232,13 +330,25 @@ EOF2
     elif [ -n "$draft_path" ]; then sed -i "s|^LLAMA_ARG_SPEC_DRAFT_MODEL=.*|LLAMA_ARG_SPEC_DRAFT_MODEL=$draft_path|" "$CONFIG/llama-server.env"; fi
     say "wrote $CONFIG/llama-server.env"
   fi
-  if [ -f "$CONFIG/llama-models.ini" ]; then say "present: $CONFIG/llama-models.ini (adopted; run llama-models-ini to add new GGUFs)"
-  elif [ "$DRY" = 1 ]; then echo "  would write: $CONFIG/llama-models.ini (router presets from config/llama-models.ini.example + $MODEL_GGUF)" >&2
+  # Presets: the section that names the GGUF is the alias the router, the launcher and the
+  # smoke test use. A GGUF the INI lacks gets a bare section (alias = file stem, lower-cased,
+  # as llama-models-ini does); it then samples from [*] only, so tune it in the INI.
+  INI="$CONFIG/llama-models.ini"; ini_appended=0
+  ini_alias() { awk -v want="model = $1" '/^\[/{s=$0; sub(/^\[/,"",s); sub(/\].*$/,"",s)} {l=$0; sub(/[ \t]+$/,"",l); sub(/^model[ \t]*=[ \t]*/,"model = ",l)} l==want{print s; exit}'; }
+  if [ -f "$INI" ]; then say "present: $INI (adopted; run llama-models-ini to add other GGUFs)"; ini_text=$(cat "$INI")
   else
-    sed "s|__HOME__|$HOME|g" "$HERE/config/llama-models.ini.example" > "$CONFIG/llama-models.ini"
-    grep -qF "model = $MODEL_GGUF" "$CONFIG/llama-models.ini" || printf '\n[%s]\nmodel = %s\n' "$(printf '%s' "$MODEL" | tr ':' '-')" "$MODEL_GGUF" >> "$CONFIG/llama-models.ini"
-    say "wrote $CONFIG/llama-models.ini"
+    ini_text=$(sed "s|__HOME__|$HOME|g" "$HERE/config/llama-models.ini.example")
+    if [ "$DRY" = 1 ]; then echo "  would write: $INI (router presets from config/llama-models.ini.example)" >&2
+    else sed "s|__HOME__|$HOME|g" "$HERE/config/llama-models.ini.example" > "$INI"; say "wrote $INI"; fi
   fi
+  alias=$(printf '%s\n' "$ini_text" | ini_alias "$MODEL_GGUF")
+  if [ -n "$alias" ]; then say "preset [$alias] serves $(basename "$MODEL_GGUF")"
+  else
+    if [ "$GGUF_FROM_FLAG" = 1 ]; then alias=$(basename "$MODEL_GGUF" .gguf | tr 'A-Z' 'a-z'); else alias=$(printf '%s' "$MODEL" | tr ':' '-'); fi
+    if [ "$DRY" = 1 ]; then echo "  would append preset [$alias] (model = $MODEL_GGUF) to $INI" >&2
+    else printf '\n; appended by bootstrap.sh on %s: bare preset (samples from [*] only), tune or remove\n[%s]\nmodel = %s\n' "$(date +%F)" "$alias" "$MODEL_GGUF" >> "$INI"; ini_appended=1; say "appended preset [$alias] -> $MODEL_GGUF (no per-model keys; see config/llama-models.ini.example)"; fi
+  fi
+  if [ "$GGUF_FROM_FLAG" = 1 ] && [ "$MODEL_EXPLICIT" = 0 ]; then MODEL="$alias"; say "model alias: $MODEL (what the launcher's CLAUDE_LOCAL_MODEL and the smoke test use)"; fi
   LUNIT="$UNIT_DIR/llama-server.service"
   if [ -e "$LUNIT" ] || [ -L "$LUNIT" ]; then
     [ -f "$LUNIT" ] || die "$LUNIT exists but is not a regular file"
@@ -265,6 +375,10 @@ EOF2
       say "llama-server up (router): models=$(curl -sf "http://127.0.0.1:${LLAMA_PORT}/models" | jq -r '[.data[].id] | join(",")')"
     else
       say "llama-server up: $(curl -sf "http://127.0.0.1:${LLAMA_PORT}/props" | jq -r '"alias=\(.model_alias) n_ctx=\(.default_generation_settings.n_ctx)"')"
+    fi
+    if [ "$ini_appended" = 1 ]; then   # an adopted, already running router reads the INI only on reload (what llama-models-ini does)
+      curl -sf --max-time 10 "http://127.0.0.1:${LLAMA_PORT}/models?reload=1" >/dev/null 2>&1 && say "router reloaded the INI" \
+        || warn "router did not reload the INI; run llama-models-ini or restart llama-server.service"
     fi
     spec_line=$(journalctl --user -u llama-server.service -n 300 --no-pager 2>/dev/null | grep -iE 'speculative|draft' | grep -viE 'n_ctx_train|control-looking' | tail -1 | sed 's/.*llama-server-run\[[0-9]*\]: //')
     say "speculative: ${spec_line:-<no draft configured>}"
@@ -293,4 +407,4 @@ if [ "$SMOKE" = 1 ] && [ "$DRY" = 0 ]; then
   CLAUDE_LOCAL_BACKEND="$BACKEND" CLAUDE_LOCAL_MODEL="$MODEL" "$HERE/test/smoke.sh" || die "smoke test failed"
 else say "skipped"; fi
 
-printf '\n\033[1;32m[bootstrap] ready.\033[0m  Run:  claude-local\n' >&2
+printf '\n\033[1;32m[bootstrap] ready.\033[0m  Run:  claude-local   (backend %s, model %s)\n' "$BACKEND" "$MODEL" >&2

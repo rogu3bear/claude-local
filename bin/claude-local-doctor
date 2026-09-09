@@ -13,7 +13,7 @@ session (it does not touch the model slot either).
 
 Sections: install (symlinks, settings, syntax, claude), env, server (unit, journal, health,
 router presets, INI vs GGUF files, drop-in applied?), gpu/memory/disk, sessions (live launchers,
-orphan proxies, ports, ledger), logs (events.jsonl summary, tool denials/failures, Claude's own
+orphan proxies, ports, ledger, transcript dirs), logs (events.jsonl summary, tool denials/failures, Claude's own
 API-error transcript lines, cache hit rate of live sessions). Exit status 1 when any FAIL.
 """
 import glob
@@ -409,6 +409,26 @@ def check_sessions():
                 "timestamps in the future stop idle-unload from ever firing")
         except ValueError:
             rep("WARN", "sessions", "idle-unload ledger", "not JSON", f"rm {led}")
+    # Claude Code keeps one transcript dir per working directory under projects/. Bench scratch repos
+    # and the /tmp dirs of the tests are never resumed, yet 623 of 628 (37 MB) had piled up
+    # by 2026-09-08; bench/run.sh and the tests now delete theirs, make clean-transcripts sweeps the rest.
+    proj = os.path.join(CONFIG, "projects")
+    try:
+        dirs = [n for n in os.listdir(proj) if os.path.isdir(os.path.join(proj, n))]
+    except OSError:
+        dirs = []
+    scratch = [n for n in dirs if n.startswith("-tmp-") or "-claude-local-bench-work-" in n]
+    size = 0
+    for n in scratch:
+        for root, _, files in os.walk(os.path.join(proj, n)):
+            for path in [root] + [os.path.join(root, f) for f in files]:   # directory inodes too, as du counts them
+                try:
+                    size += os.lstat(path).st_blocks * 512
+                except OSError:
+                    pass
+    rep("WARN" if len(scratch) > 200 else "INFO", "sessions", "transcript dirs",
+        f"{len(dirs)} total, {len(scratch)} from bench scratch repos and /tmp test dirs ({size / 2**20:.0f} MB)",
+        "make clean-transcripts")
 
 
 # -------------------------------------------------------------------- drain ----
@@ -471,7 +491,8 @@ def check_logs():
         rep("WARN", "logs", "hosted model names sent to the local router", ", ".join(hosted),
             "a Claude Code feature (auto-mode classifier, a subagent's model alias, context collapse) asked for an Anthropic model; "
             "the launcher pins those aliases to the session model and never starts in auto mode since 2026-09-08 "
-            "(CLAUDE_LOCAL_PERMISSION_MODE); a session started before that, or without the launcher, still does this")
+            "(CLAUDE_LOCAL_PERMISSION_MODE) and the proxy rewrites any that still arrive (model_rewritten); only a session "
+            "without the proxy (CLAUDE_LOCAL_PROXY=0) or without the launcher still does this")
     rep("PASS" if not warns else "WARN", "logs", f"warning events ({since_s // 3600}h)",
         ", ".join(f"{k[1]} x{len(v)}" for k, v in sorted(warns.items(), key=lambda kv: -len(kv[1]))) or "none", "")
     cm = by.get(("warn", "cache_miss")) or []

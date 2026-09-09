@@ -8,16 +8,30 @@ Setting up claude-local from scratch on a new machine. Encodes the bootstrap pro
 cd ~/dev/claude-local && ./bootstrap.sh
 ```
 
-This is a single command that goes from a fresh Linux user account to a working `claude-local` session. It's idempotent — re-running is safe and won't restart a healthy server.
+This is a single command that goes from a fresh Linux user account to a working `claude-local` session. It's idempotent: re-running is safe and won't restart a healthy server. `--dry-run` walks the same steps, prints `would ...` for every action and downloads or changes nothing.
 
 ### The 6 steps
 
-1. **Dependencies** — git, curl, jq, python3, systemd, tar, zstd, node/npm (via nvm), claude CLI (via npm)
-2. **Ollama** — user-local install into `~/.local/ollama` (~1.5GB download, ~2GB extra for ROCm bundle)
-3. **Systemd service** — installs `ollama.service` with drop-ins for context/KV/slots/flash attention and GPU profile
-4. **Model pull** — pulls the model (default: `qwen3-coder:30b`, ~18GB download)
-5. **Harness setup** — symlinks, drop-ins, `~/.local/bin/ollama` wrapper; server restarted only if needed
-6. **Smoke test** — one turn through launcher and proxy to verify the full stack works
+1. **Dependencies**: git, curl, jq, python3, systemd, tar, zstd, node/npm (via nvm), claude CLI (via npm)
+2. **Ollama**: user-local install into `~/.local/ollama` (~1.5GB download, ~2GB extra for ROCm bundle)
+3. **Systemd service**: installs `ollama.service` with drop-ins for context/KV/slots/flash attention and GPU profile; writes `~/.claude-local/env` (ports, default backend)
+4. **Model**: pulls the Ollama model (default: `qwen3-coder:30b`, ~18GB download). With `--backend llamaserver` and `--hf` or `--model-gguf` the GGUF is downloaded (resumable, `GGUF` magic and `--sha256` checked, ~23GB for the recommended file) or adopted instead, the Ollama pull is skipped and the Ollama manifest is left alone; Ollama stays installed as the fallback backend
+   - **4b. llama-server** (`--backend llamaserver` only): picks the device (`--device auto`: ROCm0 if `build-hip` lists it, else Vulkan0), writes `~/.claude-local/llama-server.env` and `llama-models.ini` (adopted if present; a preset section is appended for a GGUF the INI lacks), installs and starts `llama-server.service` on port 1244
+5. **Harness setup**: symlinks, drop-ins, `~/.local/bin/ollama` wrapper; server restarted only if needed
+6. **Smoke test**: one turn through launcher and proxy to verify the full stack works
+
+### Recommended on this machine (Strix Halo, gfx1151)
+
+llama-server with the Qwen3.6-35B-A3B MTP quant won the 2026-09-06 overnight bench: 27/27 tasks, 12.3 s/task mean, against 21.4 s for Ollama with qwen3-coder:30b on the same core tool allowlist. Needs the llama.cpp build below.
+
+```bash
+cd ~/dev/claude-local && ./bootstrap.sh --backend llamaserver \
+  --hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+  --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 \
+  --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+```
+
+URL, size (22853663008 bytes) and sha256 verified against huggingface.co on 2026-09-08. `--model-gguf` names the download: unsloth's non-MTP repo ships a different file under the same name (22360456160 bytes), and the `[qwen3.6-35b]` preset in `config/llama-models.ini.example` (reasoning off, `draft-mtp` n-max 2) expects the `-MTP` name. Without it the file keeps its remote name and gets a bare preset (`qwen3.6-35b-a3b-ud-q4_k_xl`). The device resolves to ROCm0 here (auto-detected; `--device Vulkan0` overrides).
 
 ## Required prerequisites
 
@@ -41,7 +55,16 @@ This is a single command that goes from a fresh Linux user account to a working 
 ./bootstrap.sh --gpu cpu          # CPU only (very slow)
 ```
 
-**This machine (Ryzen AI MAX+ 395, Strix Halo iGPU):** Use `amd-vulkan`. The Vulkan runner is faster than ROCm on this hardware at decode throughput. ROCm prefills faster but collapses at context depth.
+**This machine (Ryzen AI MAX+ 395, Strix Halo iGPU):** Use `amd-vulkan`. Ollama's Vulkan runner is faster than its ROCm runner on this hardware at decode throughput (and the bundled ROCm runtime segfaults on the 7.0 kernel). ROCm prefills faster but collapses at context depth.
+
+`--gpu` only picks Ollama's runner drop-in. llama-server chooses its own device:
+
+```bash
+./bootstrap.sh --backend llamaserver                    # --device auto (default): ROCm0 if build-hip lists it, else Vulkan0
+./bootstrap.sh --backend llamaserver --device Vulkan0   # explicit; always wins over auto
+```
+
+`auto` resolves to ROCm0 on this host: the HIP build prefills Qwen3.6-35B 1.3x and Qwen3.8-27B 1.6x faster than Vulkan at equal decode (2026-09-07). Bootstrap prints the choice and the reason; an existing `~/.claude-local/llama-server.env` is adopted and its `LLAMA_DEVICE` is what the unit runs.
 
 ## Backend selection
 
@@ -50,9 +73,9 @@ This is a single command that goes from a fresh Linux user account to a working 
 ./bootstrap.sh --backend llamaserver   # upstream llama.cpp; needs pre-built llama.cpp
 ```
 
-**Ollama (default):** Simplest setup. One binary, one service, works out of the box. Benchmarked at 21.4s/task mean on this hardware with core tools.
+**Ollama (default):** Simplest setup. One binary, one service, works out of the box. Benchmarked at 21.4s/task mean on this hardware with core tools. Note: `config/settings.json` pins `ANTHROPIC_BASE_URL` to the llama-server port (1244), so a bare `claude` with this config dir fails to connect by design (it never reaches Anthropic's API); `claude-local` sets the Ollama port itself. Bootstrap prints this warning after writing `~/.claude-local/env`.
 
-**llama-server:** More features — HIP support, speculative decoding, prompt cache persistence across restarts. Requires a pre-built llama.cpp (`~/ai/llama.cpp`), which needs to be compiled from source (see README for build recipe).
+**llama-server:** More features: HIP support, speculative decoding (incl. the MTP head), prompt cache persistence across restarts, router mode with one preset per GGUF. With the Qwen3.6-35B-A3B MTP quant it is the fastest measured setup on this machine (12.3 s/task, see above). Requires a pre-built llama.cpp (`~/ai/llama.cpp`), which needs to be compiled from source (see the recipe below).
 
 ## llama.cpp build recipe (for llamaserver backend)
 
@@ -71,16 +94,22 @@ cmake -S . -B build-vulkan -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build-vulkan --config Release -j -t llama-server llama-bench
 ```
 
-**Note:** `GGML_HIP_ROWMMA_FATTN` no longer exists upstream (removed July 2026). `-fa on` uses the native kernel. Ollama's bundled ROCm 7.2 runtime segfaults on Linux 7.0 kernel; the upstream build links the system ROCm 7.14 and works.
+**Note:** `GGML_HIP_ROCWMMA_FATTN` no longer exists upstream (removed July 2026). `-fa on` uses the native kernel. Ollama's bundled ROCm 7.2 runtime segfaults on Linux 7.0 kernel; the upstream build links the system ROCm 7.14 and works.
 
 ## Model selection
 
 ```bash
-./bootstrap.sh --model qwen3-coder:30b    # default; proven benchmark results
-./bootstrap.sh --model qwen3.6:35b        # Qwen3.6-35B-A3B-MTP (if GGUF is available)
+./bootstrap.sh --model qwen3-coder:30b                                        # default; Ollama pull
+./bootstrap.sh --backend llamaserver --hf OWNER/REPO/FILE.gguf [--sha256 HEX]  # download a GGUF into ~/.claude-local/models
+./bootstrap.sh --backend llamaserver --hf https://huggingface.co/OWNER/REPO/resolve/main/FILE.gguf
+./bootstrap.sh --backend llamaserver --model-gguf PATH                        # serve a GGUF already on disk (with --hf: save the download there)
 ```
 
-The model is pulled from Ollama's registry. For llama-server, the GGUF is extracted from the Ollama manifest automatically.
+With Ollama the model is pulled from Ollama's registry. With llama-server the GGUF comes from `--hf`, from `--model-gguf`, or, when neither is given, from the Ollama manifest of the pulled model (the Ollama blob of qwen3.6 is a plain Q4_K_M without the MTP head, so it is not the benchmark winner).
+
+`--hf` accepts a full `resolve/main` URL or `OWNER/REPO/FILE.gguf` (turned into that URL). The download is `curl -fL -C - --progress-bar` into `FILE.gguf.part`; the file is renamed only after its size matches the server's content-length, its first four bytes read `GGUF` and the `--sha256` (when given) matches. Rerun to resume after a network drop; the download is skipped when the file is already there with the right size and hash. Single-file GGUFs only (split `-00001-of-0000N` files are not joined). `--sha256` also verifies a `--model-gguf` file. `--dry-run` prints `would download URL (N GB) to PATH` and never downloads.
+
+Without `--model`, the name becomes the INI alias of the GGUF: the section of `~/.claude-local/llama-models.ini` whose `model =` names the file (`qwen3.6-35b` for the recommended file, with its tuned keys), or a new bare section named after the lower-cased file stem (the `llama-models-ini` rule). Bootstrap prints it on its last line; it is the `CLAUDE_LOCAL_MODEL` the launcher and the smoke test use. `--model NAME` overrides the alias.
 
 ## Draft model (speculative decoding)
 
@@ -109,7 +138,15 @@ The launcher and statusline read the port from `~/.claude-local/env`. If an exis
 cd ~/dev/claude-local && ./bootstrap.sh
 ```
 
-**With llama-server backend and draft model:**
+**Recommended here (llama-server, Qwen3.6-35B-A3B MTP quant, device auto-detected):**
+```bash
+cd ~/dev/claude-local && ./bootstrap.sh --backend llamaserver \
+  --hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+  --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 \
+  --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+```
+
+**With llama-server backend, GGUF from the Ollama manifest, and a draft model:**
 ```bash
 cd ~/dev/claude-local && ./bootstrap.sh --backend llamaserver --draft default
 ```
@@ -131,12 +168,15 @@ After bootstrap completes:
 1. **Check the server is running:**
    ```bash
    systemctl --user status ollama.service    # or llama-server.service
-   curl -sf http://localhost:$PORT/api/tags | jq '.models[].name'
+   curl -sf http://localhost:1234/api/tags | jq '.models[].name'                       # Ollama
+   curl -sf http://localhost:1244/models | jq -r '.data[] | "\(.id) \(.status.value)"'  # llama-server router: presets + load state
    ```
 
-2. **Run a smoke test through the launcher:**
+2. **Run one non-interactive turn through the launcher** (no picker):
    ```bash
-   claude-local --no-smoke  # skip the interactive picker for automation
+   CLAUDE_LOCAL_MODEL=<name> claude-local -p 'Reply with OK'
+   # <name>: the Ollama tag (qwen3-coder:30b) or the llama-server preset alias (qwen3.6-35b);
+   # bootstrap prints it on its last line
    ```
 
 3. **Verify the statusline works:**
@@ -167,6 +207,10 @@ After bootstrap completes:
 | "server did not answer on port" | Port conflict or GPU OOM | Check `ss -tlnp` for conflicts; check `dmesg` for OOM kills |
 | "no llama-server at build-hip/bin/llama-server" | llama.cpp not built yet | Build it first (see recipe above) |
 | Model pull hangs | Network issues or registry timeout | Retry; the model is ~18GB and can take minutes on slow connections |
+| "download failed; rerun to resume from ...part" | Network drop during `--hf` | Rerun the same command; `curl -C -` continues the `.part` file |
+| "exists with N bytes, expected M" | A different file already has the download's name (e.g. the non-MTP quant) | Remove it, or pass `--model-gguf PATH` to save the download elsewhere |
+| "sha256 mismatch" / "not a GGUF file" | Corrupt or wrong download | Remove the file and rerun |
+| "--hf downloads a GGUF for llama-server" | `--hf` without `--backend llamaserver` | Add `--backend llamaserver` |
 
 ## What gets installed where
 
@@ -177,7 +221,10 @@ After bootstrap completes:
 | `~/.config/systemd/user/ollama.service.d/10-claude-local.conf` | Context/KV/slots/flash attention drop-in |
 | `~/.config/systemd/user/ollama.service.d/20-gpu-*.conf` | GPU profile drop-in (one active) |
 | `~/.claude-local/env` | Persisted port + backend config |
-| `~/.claude-local/models/` | GGUF models (llama-server mode) |
+| `~/.claude-local/llama-server.env` | llama-server device (`LLAMA_DEVICE`) and INI path (llama-server mode) |
+| `~/.claude-local/llama-models.ini` | Router presets, one section per GGUF; the section name is the model alias (llama-server mode) |
+| `~/.config/systemd/user/llama-server.service` | llama-server user unit on port 1244 + drop-in (llama-server mode) |
+| `~/.claude-local/models/` | GGUF models (llama-server mode; `--hf` downloads land here) |
 | `~/.claude-local/slots/` | Prompt cache slots (llama-server mode) |
 | `~/.local/bin/claude-local` | Launcher script (symlink from repo) |
 | `~/.local/bin/ollama` | Wrapper that targets the local port |

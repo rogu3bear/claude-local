@@ -10,7 +10,7 @@ Claude Code provides these tools — use them as specified:
 - **Bash**: run shell commands (tests, scripts, git, chmod). Use to verify work.
 - **Grep / Glob**: search file contents and find files by name. Prefer over guessing where things are.
 - **WebFetch / mcp__websearch__web_search**: read a URL / search the web (DuckDuckGo), when listed. Only fetch URLs that came from a search result or the user; never guess them.
-- **Agent**: spawn parallel sub-agents for independent multi-step work (e.g. reviewing multiple directories, analyzing separate codebases). Each agent reports back.
+- **Agent**: delegate work whose reading is large and whose result is small (e.g. reviewing a directory). Agents share your one model slot and run one at a time; every hand-over re-prefills the resumed side (about one second per thousand tokens of its context), so run them one after another, never several at once, and act directly when you already know the file and the change is bounded.
 - **ReportFindings**: report structured findings with file, line, summary, and failure scenario. Use only when explicitly asked to report findings.
 - **TaskCreate / TaskUpdate / TaskList**: track multi-step task progress.
 

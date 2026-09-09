@@ -6,32 +6,38 @@
 # co-author, and this repository does not carry that claim into its permanent
 # history or onto the forge.
 #
-# This fires at authoring time. It is not the only guard, because hooks are
-# opt-in per clone and this repo's were found uninstalled on a host that had
-# already pushed 94 such commits — see scripts/contracts/check_no_ai_attribution.sh,
-# which runs in CI where nobody has to remember anything.
+# This fires at authoring time, and only in a clone that has set
+# core.hooksPath to .githooks: hooks are opt-in per clone, and this repo's were
+# found uninstalled on a host that had already pushed 94 such commits
+# (2026-09-06). So the check itself lives in
+# scripts/contracts/check_no_ai_attribution.sh: this hook calls it for the one
+# message being written, and `make lint` runs it over the whole history
+# (--log), which catches a slip before the next push even where no hook is
+# installed. The regex below is a copy, the fallback for a checkout without
+# scripts/, so the hook still works there.
 set -euo pipefail
 
 MSG_FILE="${1:?commit message file is required}"
+CONTRACT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/scripts/contracts/check_no_ai_attribution.sh"
 
 # Trailers and footers that assert authorship or link a tool session.
 FORBIDDEN='^[[:space:]]*(Co-Authored-By:[[:space:]]*(Claude|GPT|Copilot|Gemini|Codex|Cursor|Devin|OpenAI|Anthropic)|Claude-Session:|Assistant-Session:|.*Generated with \[Claude Code\]|https://claude\.ai/code/session)'
 
-if grep -qiE "$FORBIDDEN" "$MSG_FILE"; then
-  cat >&2 <<'MSG'
+if [ -x "$CONTRACT" ]; then
+  offending=$("$CONTRACT" --message-file "$MSG_FILE") && exit 0
+else
+  offending=$(grep -inE "$FORBIDDEN" "$MSG_FILE") || exit 0
+fi
+cat >&2 <<MSG
 REFUSING this commit: the message credits an AI tool as an author.
 
 Offending lines:
-MSG
-  grep -inE "$FORBIDDEN" "$MSG_FILE" | sed 's/^/  /' >&2
-  cat >&2 <<'MSG'
+$(printf '%s\n' "$offending" | sed 's/^/  /')
 
 Remove them and commit again. Describe what changed and why; if it matters that
 a tool was involved, say so in prose rather than as an authorship trailer.
 
-To bypass once (you will still be caught by the contract gate in CI):
+To bypass once (make lint still runs the same check over the history):
   git commit --no-verify
 MSG
-  exit 1
-fi
-exit 0
+exit 1

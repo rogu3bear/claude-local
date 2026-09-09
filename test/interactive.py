@@ -96,5 +96,9 @@ except subprocess.TimeoutExpired: p.kill(); print("FAIL  launcher did not exit")
 else: print(f"launcher exit code {p.returncode}")
 print(f"{sum(r)}/{len(r)} steps passed")
 if orig is not None: open(CLAUDE_JSON, 'w').write(orig)   # drop the temp trust entry
+# Claude Code's transcript of this session: projects/<physical repo path with every non-alphanumeric
+# character turned into "-"> in the isolated config (same rule in test/prefix.py and bench/run.sh)
+transcript = os.path.join(CONFIG, 'projects', re.sub(r'[^A-Za-z0-9]', '-', os.path.realpath(repo)))
 shutil.rmtree(repo, ignore_errors=True)
+shutil.rmtree(transcript, ignore_errors=True)
 sys.exit(0 if all(r) and p.returncode == 0 else 1)

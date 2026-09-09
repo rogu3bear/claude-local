@@ -78,10 +78,19 @@ for task in $task_list; do
     t0=$(date +%s.%N)
     ( cd "$w" && run_claude "$prompt" ) > "$OUT/$task-$rep.json" 2> "$OUT/$task-$rep.err"
     rc=$?
+    # Ollama reports a context length only for a loaded model: a run that started cold sampled an
+    # empty ctx_len above, so sample again once the first task has loaded it (every row carries it).
+    [ -n "$ctx_len" ] || ctx_len=$(backend_context_length "$MODEL")
     t1=$(date +%s.%N)
     wall=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.1f", b-a}')
     timed_out=false; [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && timed_out=true
     ok=false; ( cd "$w" && bash "$tdir/check.sh" ) >/dev/null 2>&1 && ok=true
+    # Claude Code keeps a transcript per working directory in $CONFIG_DIR/projects/<physical cwd with
+    # every non-alphanumeric character turned into "-"> (verified 2026-09-08 against a symlinked cwd
+    # with "." and "_" in its name). A scratch repo is never resumed, and 463 of these had
+    # piled up from bench runs by then: drop this run's right away. Only ever deletes under projects/.
+    tname=$(cd "$w" 2>/dev/null && pwd -P | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')
+    [ -n "$tname" ] && [ -d "$CONFIG_DIR/projects/$tname" ] && rm -rf "$CONFIG_DIR/projects/$tname"
     row=$(jq -c --arg label "$LABEL" --arg task "$task" --argjson rep "$rep" --argjson ok "$ok" \
              --argjson wall "$wall" --argjson rc "$rc" --argjson timed_out "$timed_out" \
              --arg model "$MODEL" --arg ctx "${ctx_len:-}" --arg server "$server_env" --arg flags "$flags_str" \

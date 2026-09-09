@@ -61,6 +61,11 @@ run(pre("Write", {"file_path": os.path.join(cwd, "-home-mln-dev-dev-proj-a.py"),
 run(pre("Write", {"file_path": "/tmp/claude-abc/notes.md", "content": "x"}), True, "invented /tmp/claude-* denied")
 run(pre("Edit", {"file_path": os.path.expanduser("~/.claude/settings.json"), "old_string": "a", "new_string": "b"}), True, "real ~/.claude denied")
 run(pre("Write", {"file_path": "/etc/hosts", "content": "x"}), True, "/etc denied")
+run(pre("Write", {"file_path": "/opt/rocm/x", "content": "x"}), True, "/opt denied")
+run(pre("Write", {"file_path": "/var/lib/x", "content": "x"}), True, "/var/lib denied")
+run(pre("Write", {"file_path": "/root/x", "content": "x"}), True, "/root denied")
+run(pre("Write", {"file_path": "/srv/www/x", "content": "x"}), True, "/srv denied")
+run(pre("Write", {"file_path": "/var/tmp/x", "content": "x"}), False, "/var/tmp allowed (scratch location)")
 run(pre("Write", {"file_path": os.path.expanduser("~/claude-local-hooktest-elsewhere.txt"), "content": "x"}), False, "outside cwd allowed (logged)")
 run(pre("Write", {"file_path": "/etc/hosts", "content": "x"}), False, "path guard off", {"CLAUDE_LOCAL_PATHGUARD": "0"})
 # post events
@@ -72,10 +77,10 @@ run({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": None}, 
 rows = [json.loads(l) for l in open(os.path.join(sess, "tools.jsonl"))]
 evs = [json.loads(l) for l in open(os.path.join(sess, "events.jsonl"))]
 kinds = [e["kind"] for e in evs]
-c1 = sum(1 for r in rows if r.get("denied")) == 19
-c2 = kinds.count("tool_denied") == 19 and "tool_failed" in kinds and "tool_outside_cwd" in kinds and "hook_exception" not in kinds
+c1 = sum(1 for r in rows if r.get("denied")) == 23
+c2 = kinds.count("tool_denied") == 23 and "tool_failed" in kinds and "tool_outside_cwd" in kinds and "hook_exception" not in kinds
 c3 = any(r.get("event") == "fail" and r.get("ok") is False for r in rows) and any(r.get("event") == "post" and r.get("ok") is False and r.get("err") == "boom" for r in rows)
-for ok, what in ((c1, f"audit rows: 19 denials ({sum(1 for r in rows if r.get('denied'))})"), (c2, f"events: {sorted(set(kinds))}"), (c3, "post/fail rows carry ok=false and the error")):
+for ok, what in ((c1, f"audit rows: 23 denials ({sum(1 for r in rows if r.get('denied'))})"), (c2, f"events: {sorted(set(kinds))}"), (c3, "post/fail rows carry ok=false and the error")):
     print(("ok   " if ok else "FAIL ") + what)
     if not ok:
         fails.append(what)

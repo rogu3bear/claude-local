@@ -8,6 +8,7 @@
 #   ~/.local/bin/claude-local-doctor -> bin/claude-local-doctor (read-only diagnosis of the stack)
 #   ~/.local/bin/claude-local-drain  -> bin/claude-local-drain  (unload models no session uses)
 #   ~/.config/systemd/user/claude-local-drain.{service,timer}     (copied if changed; timer enabled)
+#   git config core.hooksPath .githooks   (in this checkout: the commit-message contract, .githooks/commit-msg)
 #   ~/.claude-local/bench          -> bench/
 #   ~/.claude-local/skills         -> skills/   (Claude Code reads them only when Skill is in CLAUDE_LOCAL_TOOLS)
 #   ~/.config/systemd/user/ollama.service.d/10-claude-local.conf   (copied if changed)
@@ -81,6 +82,10 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
 fi
 if [ "$CONFIG" != "$HOME/.claude-local" ]; then
   echo "note: set statusLine.command in $CONFIG/settings.json to $CONFIG/statusline.sh and the hook commands to $CONFIG/hook-urlguard.py / $CONFIG/hook-audit.py" >&2
+fi
+# The commit-message contract (.githooks/commit-msg) runs only in a clone that points git at it.
+if git -C "$HERE" rev-parse --git-dir >/dev/null 2>&1 && [ "$(git -C "$HERE" config --get core.hooksPath 2>/dev/null)" != .githooks ]; then
+  git -C "$HERE" config core.hooksPath .githooks && echo "set core.hooksPath=.githooks (commit-message contract active in this checkout)" >&2
 fi
 [ "$changed" = 1 ] && echo "DROPIN_CHANGED"
 echo "done. try: claude-local" >&2

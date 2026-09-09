@@ -24,13 +24,13 @@ Claude Code provides more than Read/Edit/Write/Bash/Grep/Glob. Use them as follo
 
 **Single-step tasks** (read a file, run a command, search code): use tools directly. One focused call per step, wait for the result. If the same call fails twice, stop and summarize — do not retry blindly.
 
-**Multi-step independent work**: spawn Agents with `Agent`. Each agent runs in parallel and reports back. Use this for reviewing directories, analyzing separate codebases, or any task that can be split into independent sub-tasks. Spawn agents when you'd otherwise need to read more than 10 files to answer a question.
+**Multi-step independent work**: delegate to an `Agent`. Agents share the one model slot with you and run one at a time, never in parallel; every hand-over between you and an agent re-prefills the resumed side from the prompt cache, about one second per thousand tokens of its context. Use an Agent when the reading is large and the result is small: reviewing a directory, or answering a question that would otherwise take many file reads. Run agents one after another: spawn one, wait for its report, then decide whether another is needed.
 
 **Complex sequential workflows**: use TaskCreate/TaskUpdate/TaskList to track progress. Mark tasks in_progress before starting, completed after verifying.
 
 **Structured findings**: use ReportFindings with verified issues only — not tentative observations. Each finding needs file, line, summary, and a concrete failure scenario.
 
-Delegate when work can run in parallel or when the sub-task is broad enough that you'd need to read many files to answer it. Act directly when you already know the relevant file and the change is bounded.
+Delegate when the sub-task is broad enough that you'd need to read many files to answer it and only a short result needs to come back. Act directly when you already know the relevant file and the change is bounded.
 
 ## Memory system
 

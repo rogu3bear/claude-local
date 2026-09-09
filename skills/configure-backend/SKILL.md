@@ -44,7 +44,7 @@ Environment=LLAMA_ARG_UBATCH=2048               # micro-batch size
 Located at `~/.claude-local/llama-server.env`:
 
 ```bash
-LLAMA_DEVICE=Vulkan0              # selects build dir: ROCm0→build-hip, Vulkan0→build-vulkan
+LLAMA_DEVICE=ROCm0                # selects the build dir: ROCm0 -> build-hip, Vulkan0 -> build-vulkan; bootstrap --device auto (the default) picks ROCm0 when build-hip lists it, else Vulkan0
 LLAMA_CPP_DIR=/home/mln-dev/ai/llama.cpp   # source directory
 LLAMA_ARG_MODELS_PRESET=/home/mln-dev/.claude-local/llama-models.ini   # router mode: absolute path, systemd does not expand $HOME
 LLAMA_EXTRA_ARGS=                 # CLI flags for every instance; they BEAT the INI, so keep sampling out of here
@@ -107,8 +107,9 @@ OLLAMA_FLASH_ATTENTION=1
    sed -i 's/^LLAMA_DEVICE=.*/LLAMA_DEVICE=ROCm0/' ~/.claude-local/llama-server.env
    systemctl --user restart llama-server.service
 
-   # For Ollama: swap the GPU drop-in
-   cp ~/.claude-local/config/systemd/20-gpu-amd-rocm.conf \
+   # For Ollama: swap the GPU drop-in. The profiles live in the checkout's systemd/ directory
+   # (~/dev/claude-local, or "$(dirname "$(readlink -f ~/.local/bin/claude-local)")/../systemd"), not under ~/.claude-local
+   cp ~/dev/claude-local/systemd/20-gpu-amd-rocm.conf \
       ~/.config/systemd/user/ollama.service.d/20-gpu.conf
    systemctl --user daemon-reload && systemctl --user restart ollama.service
    ```

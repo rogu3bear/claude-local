@@ -11,6 +11,7 @@ hold the denied row. ~15 s per mode.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -76,7 +77,11 @@ def check(mode):
             fails.append(mode)
     finally:
         stub.terminate()
+        # Claude Code's transcript of this run: projects/<physical work dir with every non-alphanumeric
+        # character turned into "-"> in the isolated config (same rule in test/prefix.py and bench/run.sh)
+        transcript = os.path.join(CONFIG, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.join(tmp, "work"))))
         shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(transcript, ignore_errors=True)
 
 
 for mode in MODES:

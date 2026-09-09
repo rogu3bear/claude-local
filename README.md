@@ -1,6 +1,6 @@
 # claude-local
 
-Run Claude Code against a local model server (Ollama) from a fully isolated
+Run Claude Code against a local model server (llama.cpp llama-server or Ollama) from a fully isolated
 config directory, with the harness fitted to a small model and every knob
 backed by a benchmark number.
 
@@ -9,11 +9,21 @@ backed by a benchmark number.
                             # systemd user service, model pull, symlinks, server drop-in, smoke turn.
                             # Idempotent (no server restart unless the drop-in env changed); --dry-run shows the plan; no sudo.
                             # The port is persisted in ~/.claude-local/env; `ollama` on PATH is a wrapper that targets it.
+    ./bootstrap.sh --backend llamaserver \
+      --hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+      --sha256 55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1 \
+      --model-gguf ~/.claude-local/models/Qwen3.6-35B-A3B-MTP-UD-Q4_K_XL.gguf
+                            # recommended on Strix Halo: llama-server with the 2026-09-06 overnight winner. --hf downloads
+                            # the GGUF (23GB; resumable, size, magic and sha256 checked, skipped when present) and skips the
+                            # Ollama pull; --device auto (default) takes ROCm0 when build-hip lists it, else Vulkan0;
+                            # --model-gguf names the file because the [qwen3.6-35b] preset expects the -MTP name the
+                            # remote file lacks. URL, size and hash verified against huggingface.co on 2026-09-08.
     make install            # symlinks only (already-bootstrapped machine)
     claude-local            # pick a model, go
-    make test               # offline tests: proxy error events, hook guards (no server needed)
+    make test               # offline tests: proxy events, hook and URL guards, drain, the launcher itself (fake claude); no server, ~15 s
     make doctor             # read-only diagnosis of install, server, GPU, sessions, drain, error logs
     make drain-status       # what is resident, who uses it, what the drain timer will unload
+    make clean-transcripts  # delete the transcript dirs that bench scratch repos and /tmp test dirs left under ~/.claude-local/projects
     make check              # offline tests + one smoke turn through launcher and proxy
     make check-interactive  # pty-driven full session (picker, statusline, Ctrl-C, exit menu)
     make check-guard        # offline: a refused Bash command stays refused in every pinned permission mode
@@ -34,7 +44,11 @@ Two servers can be installed side by side; `CLAUDE_LOCAL_BACKEND` picks one and
 
     CLAUDE_LOCAL_BACKEND=llamaserver claude-local     # one session on llama-server
     make check-llama                                   # smoke turn against it
-    ./bootstrap.sh --backend llamaserver               # install it (needs a llama.cpp build, see below)
+    ./bootstrap.sh --backend llamaserver               # install it (needs a llama.cpp build, see below). --device auto|ROCm0|Vulkan0
+                                                       # (default auto: ROCm0 when build-hip lists it, else Vulkan0); --hf OWNER/REPO/FILE.gguf
+                                                       # or a URL downloads the GGUF into ~/.claude-local/models (--sha256 HEX verifies it,
+                                                       # --model-gguf PATH names it), skips the Ollama pull and appends a preset to the INI
+                                                       # when none names the file; the Strix Halo command is at the top
 
 Two files configure the unit. `~/.claude-local/llama-server.env` holds the device
 (`LLAMA_DEVICE=ROCm0|Vulkan0`, which implies build-hip or build-vulkan) and the path of
@@ -109,7 +123,7 @@ dir is reaped, with a `session_reaped` event.
 
     claude-local-doctor            # read-only diagnosis, safe next to a live session (make doctor)
     claude-local-doctor --since 2h --quiet
-    make test                      # offline: proxy error/anomaly events, hook guards, URL guard, drain, no model server (~10s)
+    make test                      # offline: proxy error/anomaly events, hook guards, URL guard, drain, launcher flags; no model server (~15s)
     make check-prefix              # offline: real `claude -p` through proxy+stub, every follow-up request must extend the previous one
     make check-guard               # offline: real `claude -p` through the stub in acceptEdits and bypassPermissions; the guard must still refuse
     tail -f ~/.claude-local/logs/events.jsonl | jq -c '{level,kind,hint}'
@@ -128,6 +142,7 @@ What the proxy records (`config/proxy.py`), each with a `hint` saying what to do
 | `output_truncated`, `empty_output`, `slow_prefill`, `slow_decode` | warn | stop_reason max_tokens; no tokens; ttft > 30 s; < 8 tok/s |
 | `model_resume`, `model_restarted`, `restored`, `checkpoint*`, `idle_unload` | info/warn | the checkpoint layer's decisions |
 | `volatile_system_stripped` | info | see below |
+| `model_rewritten` | info | a request named a hosted model (`claude-*`: the auto-mode classifier, a subagent's model alias, context collapse) and the proxy ran it on the session's current model instead; `from`, `to`, `msgs`. The launcher pins the aliases, so this should be rare |
 
 `CLAUDE_LOCAL_PROXY_DEBUG=2` also dumps every request body to `run/<pid>/requests/` for a post-mortem.
 Every usage row now carries `conv` (conversation id) and `div`, so `usage.jsonl` alone shows a subagent
@@ -138,7 +153,7 @@ interleaving with its parent or a prefix that changed.
 the old ones kept. The proxy's fold moved it into the system prompt, so on a hybrid model every turn
 re-prefilled the tool schemas and the whole conversation (12K-30K tokens, 15-40 s; the server log shows
 `selected slot by LCP similarity, f_sim_best = 0.45`). The proxy now drops that block wherever it appears
-(`strip_volatile`), the launcher sets `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off` so it is not sent at all, and
+(`strip_volatile`: in a `role: system` entry, a user text block or a plain-string user message alike), the launcher sets `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off` so it is not sent at all, and
 `make check-prefix` fails if any follow-up request is not a pure extension of the previous one. The moving
 `cache_control` breakpoint that Claude Code also sends is not rendered by the server and is ignored.
 
@@ -154,7 +169,8 @@ force push; `reset --hard`, `clean -f`; `kill -9 -1`; reboot; `curl | sh`) and, 
 that stops or restarts the server or proxy serving the current session (`systemctl restart llama-server`,
 `fuser -k 1244/tcp`, `pkill llama-server`, `kill <proxy pid>`), which the old diagnose skill used to suggest;
 Write/Edit to a flattened path (`-home-user-...`, seen from small models), an invented `/tmp/claude-*`
-directory, the real `~/.claude`, or a system directory. Refusals are `tool_denied` events and show on the
+directory, the real `~/.claude`, or a system root (`/etc`, `/usr`, `/boot`, `/bin`, `/sbin`, `/lib`, `/proc`, `/sys` and,
+since 2026-09-08, `/opt`, `/root`, `/srv` and `/var`; `/var/tmp` stays allowed as scratch). Refusals are `tool_denied` events and show on the
 statusline. `CLAUDE_LOCAL_BASHGUARD=0`, `CLAUDE_LOCAL_PATHGUARD=0`, `CLAUDE_LOCAL_AUDIT=0` switch the parts off.
 
 **Permission mode and model names stay local.** The launcher passes `--permission-mode` (`CLAUDE_LOCAL_PERMISSION_MODE`,
@@ -162,12 +178,21 @@ default `acceptEdits`; `manual`, `plan`, `dontAsk`, `bypassPermissions` and `aut
 or `--dangerously-skip-permissions` on the command line wins) and never starts in auto mode by itself: auto mode's
 classifier sends a ~35K-token prompt to a hosted model for every tool call it evaluates, which against this router is
 an HTTP 400 for `claude-sonnet-5` followed by the same prompt on the single local slot as a fallback (seen 2026-09-08,
-the "issue with the selected model" API error). The guard above is the gate in every mode; `make check-guard` runs a
-real `claude -p` against the stub in `acceptEdits` and `bypassPermissions` and requires the refused command to stay
-refused. For the same reason the launcher pins every internal model choice to the session model unless the variable
-is already set: `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL`,
-`CLAUDE_CODE_BG_CLASSIFIER_MODEL` and `CLAUDE_CONTEXT_COLLAPSE_MODEL`, so a subagent asked for "haiku" never reaches the
-router with a name it does not know. The doctor flags any `claude-*` name that still gets through.
+the "issue with the selected model" API error). The isolated settings also set `permissions.disableAutoMode`, so auto
+mode is hidden from the Shift+Tab cycle mid-session (Claude Code 2.1.266; with it set, `--permission-mode auto` is accepted but ignored: the debug log says
+"auto mode disabled: disableAutoMode in settings" and the session starts without it, verified 2026-09-09). The guard above is the gate in every mode; `make check-guard` runs a real `claude -p`
+against the stub in `acceptEdits` and `bypassPermissions` and requires the refused command to stay refused. For the same
+reason the launcher pins six internal model choices to the session model unless the variable is already set:
+`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL`, `CLAUDE_CODE_BG_CLASSIFIER_MODEL` and
+`CLAUDE_CONTEXT_COLLAPSE_MODEL`, so a classifier asked for "sonnet" never reaches the router with a name it does not know.
+`CLAUDE_CODE_SUBAGENT_MODEL` is left unset on purpose: Claude Code gives a subagent the parent's current model unless it
+is set, so subagents follow a mid-session `/model` switch. Any `claude-*` name that still reaches the proxy is rewritten
+to the session's current model (the last local model a turn used, else the launch model, which the launcher passes as
+`PROXY_SESSION_MODEL`) and logged as `model_rewritten`; the rewrite precedes fingerprinting, so the turn keeps its
+conversation id, and any other unknown name still fails loudly as `model_not_found`. `test/launcher.py` proves both with a
+fake `claude` (a `claude-sonnet-5` turn through the launcher-started proxy runs on the session model). The doctor flags any
+`claude-*` name that still gets through, which now takes a session without the proxy (`CLAUDE_LOCAL_PROXY=0`) or without
+the launcher.
 
 The statusline's second line shows the session's last error or warning for ten minutes
 (`!! turn_failed 500 template (1 err)`), so a retry loop is visible without opening any log.
@@ -180,7 +205,9 @@ reloaded), the drop-in against the running unit's environment (changed but not r
 autocompact, the RAM budget (`LLAMA_ARG_CACHE_RAM` x `LLAMA_ARG_MODELS_MAX` plus the largest weights against RAM)
 and the unit's memory and swap peaks since it started, orphan slot files; memory, swap, GPU memory, kernel GPU
 resets and OOM kills, disk; live launchers, stale session dirs (and which of them a killed launcher left
-unarchived), orphan proxies, ports, the idle-unload ledger; the event log by kind with
+unarchived), orphan proxies, ports, the idle-unload ledger, the transcript dirs under `~/.claude-local/projects` (how many
+the bench scratch repos and `/tmp` test dirs left behind, WARN above 200 with the hint `make clean-transcripts`; 623 of 628,
+37 MB, on 2026-09-08); the event log by kind with
 the last occurrence's hint, tool denials and failures, Claude Code's API-error lines, and the median cache
 hit of live sessions. It never restarts, kills or edits anything.
 
@@ -207,7 +234,12 @@ slot. Hybrid models cannot rewind, so each hand-over re-prefills the resumed sid
 `conv_switch`, so `usage.jsonl` shows what a session with Agents costs. Use Agent for work whose result is
 small and whose reading is large; run subagents sequentially rather than in parallel; or raise
 `LLAMA_ARG_N_PARALLEL` in the drop-in at the cost of splitting the 128K context between slots (and lowering
-autocompact to match).
+autocompact to match). Since 2026-09-08 the operator prompt (`config/system_prompt.md`, and the compact one) says
+exactly this to the model: agents share its one slot and run one at a time, every hand-over re-prefills the resumed
+side at about a second per thousand tokens of its context, use an Agent when the reading is large and the result
+small, and run agents one after another, never several at once (the old text promised parallel agents for more than
+10 files). The evidence behind it: in a 60-turn session measured 2026-09-08, 18 side calls (subagents, WebFetch
+summaries) took 191 of 589 GPU seconds.
 
 ### Checkpoints and resume (llama-server)
 
@@ -239,6 +271,12 @@ settings pre-allow `WebFetch` so browsing never prompts, and a PreToolUse hook (
 denies any fetch whose URL, or a parent path of it, has not already appeared in a user message, a
 search result or a tool output. The denial tells the model to search first. `CLAUDE_LOCAL_URLGUARD=0`
 turns the guard off.
+
+Raw benchmark rows are kept locally under `bench/results` and are mostly not in the repository: since the
+2026-09-06 prune ("README has numbers as text tables") `.gitignore` keeps out every `bench/results/*.jsonl`,
+per-run directory, proxy log and metrics snapshot, and only the microbench files under `bench/results/micro/`
+plus the core-allowlist full-bench files `fb-ollama-vk-core.jsonl` and `proxy/usage-fb-*.jsonl` are tracked,
+so the tables here are the record.
 
 Measured 2026-09-07 (`bench/microbench.py`, cold prefill / decode at 2.7K, 10K and 30K prompt
 tokens, n_out 128, medians of 2; `bench/results/micro/micro-q38-{rocm,vulkan}.jsonl`):
@@ -319,23 +357,25 @@ Memory when everything is resident: Ollama ~26GB + one llama-server model (22-29
 |---|---|
 | `bin/claude-local` | launcher: server check, model picker, load, autocompact fit, prompt render, usage proxy, Claude launch, post-exit menu |
 | `config/backend-ollama.sh` | backend adapter (the function contract is documented in the file) |
-| `config/proxy.py` | streaming reverse proxy that logs per-turn usage (cache hit, tok/s, latency); optional sampling override; folds Claude Code's mid-conversation `role: system` message (Agent tool type list) into the system prompt, which Qwen3.8's chat template otherwise rejects with HTTP 500 |
+| `config/proxy.py` | streaming reverse proxy that logs per-turn usage (cache hit, tok/s, latency); optional sampling override; folds Claude Code's mid-conversation `role: system` message (Agent tool type list) into the system prompt, which Qwen3.8's chat template otherwise rejects with HTTP 500, and strips the `<total_tokens>` counter; rewrites a `claude-*` model name to the session's current model (`model_rewritten`); checkpoint/resume and idle unload of presets; every error and anomaly event |
 | `config/statusline.sh` | four-line cockpit fed by the proxy log; per-session state; the model shown is the one Claude is using (follows `/model`) with its load state on the server |
 | `config/mcp-websearch.py` | stdio MCP server: `web_search` over DuckDuckGo HTML, replacing the built-in WebSearch that cannot run against a local server |
 | `config/hook-urlguard.py` | PreToolUse hook: denies WebFetch on a URL the conversation has never shown the model |
-| `config/settings.json` | the isolated Claude Code settings: statusline, hook, pre-allowed WebFetch and web search, and an `env` block that keeps a bare `claude` run with this config dir on the local llama-server port instead of Anthropic's API |
+| `config/settings.json` | the isolated Claude Code settings: statusline, hook, pre-allowed WebFetch and web search, `permissions.disableAutoMode` (auto mode hidden from the Shift+Tab cycle), and an `env` block that keeps a bare `claude` run with this config dir on the local llama-server port instead of Anthropic's API |
 | `config/picker.py` | model menu, or non-interactive via `CLAUDE_LOCAL_MODEL` |
-| `config/system_prompt.md` | operator prompt appended to Claude's built-in prompt (`{{MODEL}}` templated) |
+| `config/system_prompt.md` | operator prompt appended to Claude's built-in prompt (`{{MODEL}}` templated); tells the model that Agents share its one slot and run one after another |
 | `config/system_prompt_compact.md` | replacement prompt for `CLAUDE_LOCAL_PROMPT=replace`; faster, less careful |
-| `bootstrap.sh` | single entry point for a fresh machine (see top). `--gpu amd-vulkan\|amd-rocm\|nvidia\|cpu` picks a profile; an existing user unit is adopted (its port and binary), never overwritten |
+| `bootstrap.sh` | single entry point for a fresh machine (see top). `--gpu amd-vulkan\|amd-rocm\|nvidia\|cpu` picks the Ollama profile; `--backend llamaserver` adds step 4b (`--device auto\|ROCm0\|Vulkan0`, default auto; `--hf URL\|OWNER/REPO/FILE.gguf` with `--sha256 HEX` downloads the GGUF, `--model-gguf PATH` names it, the Ollama pull is skipped, a preset is appended to the INI when none names the file and the alias becomes the model); an existing user unit, env file or INI is adopted, never overwritten |
 | `systemd/ollama.service` | generic unit template (no GPU or tuning env; those are drop-ins) |
 | `systemd/10-claude-local.conf` | drop-in: flash attention, 128K context, q8_0 KV, one slot, 2h keep-alive. Flash attention lives here because q8_0 KV silently falls back to f16 without it |
 | `systemd/20-gpu-*.conf` | GPU profile drop-ins; bootstrap installs the chosen one as `20-gpu.conf` |
 | `systemd/llama-server/` | llama-server unit template and drop-in (incl. `LLAMA_ARG_MODELS_MAX=2` and a 16 GB RAM prompt cache per instance); `config/llama-server.env.example` (device, INI path) and `config/llama-models.ini.example` (one preset per model) are its per-machine config; `bin/llama-server-run` is the ExecStart wrapper (device -> build dir, router vs single-model mode); `bin/llama-models-ini` appends presets for new GGUFs and reloads the router |
 | `config/backend-llamaserver.sh` | llama-server adapter: router inventory with load state, load/unload via `/models/*` with status polling, per-model props, slot save/restore (single-model mode still supported) |
-| `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner, comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs); results in `bench/results` |
+| `bench/` | 9 fixed tasks (09 is a ~630-line module whose first Read is a 6K-token turn), runner (`run.sh`, which deletes its scratch repo's transcript dir after each run), comparison, `microbench.py` (cold prefill / decode / warm-prefix for both APIs), `stack.sh` (one-line stack identity per row: kernel, firmware, Mesa, the glslc that built the Vulkan backend, `_q8_1` shader count, llama.cpp, Ollama, ROCm); results in `bench/results`, mostly local only (see above) |
 | `skills/` | operator skills (configure/diagnose backend, manage models, tune, bench, bootstrap); linked into `~/.claude-local/skills` but only loaded when `Skill` is added to `CLAUDE_LOCAL_TOOLS`, which the 2026-09-05 measurements found to be a turn sink |
-| `test/` | smoke turn, pty-driven interactive session, checkpoint/resume and idle-unload tests; offline: proxy events, hook and URL guards, drain, prefix stability, guard under each permission mode (all against `test/stub_upstream.py`) |
+| `test/` | smoke turn, pty-driven interactive session, checkpoint/resume and idle-unload tests; offline: proxy events, hook and URL guards, drain, prefix stability, guard under each permission mode, and the launcher itself (`test/launcher.py`: a fake `claude` on PATH records what it is started with and sends one `claude-*` turn through the launcher-started proxy), all against `test/stub_upstream.py`; the tests delete the transcript dirs they leave |
+| `scripts/contracts/check_no_ai_attribution.sh` | commit-message contract: no commit may credit an AI tool as an author (`Co-Authored-By: Claude\|GPT\|Copilot\|...`, `Claude-Session:`, `Generated with [Claude Code]`, session links). `--message-file FILE` is what `.githooks/commit-msg` runs (active only in a clone that set `git config core.hooksPath .githooks`); `--log [RANGE]` walks the history (default all of it) and is part of `make lint`, hence of `make test` and every `make check*`; exit 1 on a hit, 2 on usage |
+| `Makefile` | the targets at the top; `make lint` syntax-checks every script and runs the attribution contract; `make clean-transcripts` deletes only `projects/-tmp-*` and `*-claude-local-bench-work-*` under `~/.claude-local` (Claude Code keeps one transcript dir per working directory, named from the physical cwd with every non-alphanumeric character turned into `-`) and prints how many dirs and MB it freed |
 
 All env overrides are listed at the top of `bin/claude-local`.
 
@@ -349,6 +389,8 @@ All env overrides are listed at the top of `bin/claude-local`.
 | control: server fit without the flag | 16 | 100% | 69.0s | 90% |
 | compact replacement prompt | 24 | 88% | 22.0s | 99% |
 | Q8 weights | 8 | 88% | 35.9s | 98% |
+
+Mesa 26.2.2 gate (2026-09-08, label mesa262-ollama, 9 tasks x 1): 9/9, mean wall 27.8s, cache 96% versus fb-ollama-vk-core's 27/27, 21.4s, 95% on Mesa 25.2.8 (27 runs, the operator prompt also changed on 2026-09-08). Pass and cache rates are unchanged; the 6s higher mean comes from the first task, which included the model load (58s vs 23s), and one 18-turn run of 08-cli-flag (43s vs 18s) under a longer prompt (74K vs 50K prompt tokens per run), while the other seven tasks landed within 4s of the reference. Nothing here points at the driver, but a single repetition cannot separate Mesa from the prompt change.
 
 - `--exclude-dynamic-system-prompt-sections` is the single biggest win: git status leaves the
   system prompt, so editing files no longer re-renders it and busts the server's prefix cache
@@ -383,7 +425,7 @@ Microbench (`bench/microbench.py`, cold prompt, temperature 0, medians of 3; raw
 
 (prefill and decode in tok/s; "warm turn" = cached prefix plus a few new tokens and 128 output tokens, the shape of a Claude Code turn)
 
-Stack identity for every 2026-09-05 row (`bench/stack.sh`): kernel 7.0.0-31, firmware pfp/mec/mes 0x31/0x22/0x86, Mesa 25.2.8 (RADV), glslc 2023.8, llama.cpp 6a1a922d2, Ollama 0.33.3, ROCm 7.14. The upstream Vulkan build used Ubuntu's glslc 2023.8 (20 q8_1 shader variants vs 513 in Ollama's bundle). A rebuild with LunarG glslc 2026.3 (892 variants, label `intdot-vk`, `bench/results/micro/micro-intdot.jsonl`) measured within noise of it at every size for this Q4_K_M model (prefill 1246/998/571/225 vs 1213/952/561/226 tok/s at 2.7K/10K/30K/100K; decode 74/64/46/21 vs 77/63/43/22), so the rows above stand. No GPU resets occurred during these runs (the previous boot had 9, all on Sep 3-4 under Ollama's Vulkan runner at 60-87K tokens in flight; kernel 7.0's 2s GPU job timeout is the suspected cause).
+Stack identity for every 2026-09-05 row (`bench/stack.sh`): kernel 7.0.0-31, firmware pfp/mec/mes 0x31/0x22/0x86, Mesa 25.2.8 (RADV), glslc 2023.8, llama.cpp 6a1a922d2, Ollama 0.33.3, ROCm 7.14. The upstream Vulkan build used Ubuntu's glslc 2023.8 (20 q8_1 shader variants vs 513 in Ollama's bundle). A rebuild with LunarG glslc 2026.3 (892 variants, label `intdot-vk`, `bench/results/micro/micro-intdot.jsonl`) measured within noise of it at every size for this Q4_K_M model (prefill 1246/998/571/225 vs 1213/952/561/226 tok/s at 2.7K/10K/30K/100K; decode 74/64/46/21 vs 77/63/43/22), so the rows above stand. Two corrections to the recorded stack strings, 2026-09-08: `bench/stack.sh` read `glslc --version` from PATH, so every row recorded after that rebuild carries `glslc 2023.8` although the backend was built with 2026.3; it now reports the compiler that built the Vulkan backend (the `Vulkan_GLSLC_EXECUTABLE` of `build-vulkan/CMakeCache.txt`, printed as `glslc=2026.3(build)`, or `(path)` when it has to fall back to PATH) and the `_q8_1` shader count of `libggml-vulkan.so` (`vkshaders=892` today; the 2023.8 build had 20). And Mesa moved from 25.2.8 to 26.2.2 (kisak PPA) on 2026-09-06 at 11:53 (dpkg log), after the 2026-09-05/06 rows and before the 2026-09-07 Qwen3.8 rows, so those tables sit on different Mesa builds; today's host line is kernel 7.0.0-31-generic, fw pfp/mec/mes 35/24/91, Mesa 26.2.2, glslc 2026.3(build), vkshaders 892, llama.cpp 6a1a922d2, Ollama 0.33.3, ROCm 7.14. The Ollama baseline on the new Mesa was recorded on 2026-09-08 under the label `mesa262-ollama` (the Phase 4 gate; `bench/compare.py mesa262-ollama fb-ollama-vk-core` reads it against the 2026-09-05 core-allowlist run): 9/9, mean wall 27.8s, cache 96% against 21.4s and 95% on Mesa 25.2.8, with the first task carrying the model load; the Mesa 26.2.2 gate paragraph under Measured claims has the reading. No GPU resets occurred during these runs (the previous boot had 9, all on Sep 3-4 under Ollama's Vulkan runner at 60-87K tokens in flight; kernel 7.0's 2s GPU job timeout is the suspected cause).
 
 - **Upstream Vulkan beats Ollama's Vulkan everywhere**: +10% to +64% prefill, equal-or-better decode, and 22.5 vs 8.2 tok/s decode at 100K context. Newer kernels, same backend.
 - **HIP prefills fastest but decodes slowest**, and its decode collapses with context (7.6 tok/s at 100K). Claude turns are decode-dominated, so Vulkan wins the per-turn cost at every depth; HIP is the choice only for prefill-bound work. Both backends lose ~90% of prefill throughput between depth 0 and 100K in llama-bench, so that cliff is the hardware's attention cost, not a HIP regression.
@@ -407,7 +449,7 @@ Stack identity for every 2026-09-05 row (`bench/stack.sh`): kernel 7.0.0-31, fir
 - **The tool surface is the second biggest lever after the cache flag.** With the full tool list the model spends ~30% of its turns on meta-tools (ReportFindings, TaskList/Create/Update, Skill, subagents); denylisting some just routes it to the next sink (74 Skill calls through llama-server, 3x task time). `--tools Bash,Read,Edit,Write,Grep,Glob` removes the sinks and shrinks the system prompt from ~15K to ~4.3K tokens. Ollama went 49s -> 21.4s on the same evening; the morning baseline on a cool GPU was 31s.
 - **Default backend stays Ollama.** With identical tools, sampling and GGUF, the model takes 64% more turns and emits 2x the output tokens through llama-server's chat template, so task time is 1.8x worse even though the engine is equal or faster per turn (decode 69 vs 69 tok/s; large-prefill TTFT 9.1s vs 12.9s). Gate 2 fails; gates 1, 3, 4 and 5 pass (27/27, zero flakes in 108 llama-server runs, interactive 9/9, warm resume and slot restore verified).
 - llama-server stays installed and verified as the alternative (`CLAUDE_LOCAL_BACKEND=llamaserver claude-local`): it wins at long context (22.5 vs 8.2 tok/s decode at 100K), persists the prompt cache across restarts (12.4K tokens saved in 123ms / restored in 42ms; next turn 2.9s TTFT vs 13.8s cold), and parses Qwen3-Coder tool calls natively. HIP is prefill-fast but collapses at depth (154s mean here); use it only for prefill-bound work.
-- Stack for every row: kernel 7.0.0-31, fw pfp/mec/mes 31/22/86, Mesa 25.2.8 (RADV), glslc 2023.8, llama.cpp 6a1a922d2, Ollama 0.33.3, ROCm 7.14 (`bench/stack.sh`; recorded per row from now on). Raw rows: `bench/results/fb-*.jsonl`, per-turn proxy logs `bench/results/proxy/`, metrics snapshots alongside.
+- Stack for every row: kernel 7.0.0-31, fw pfp/mec/mes 31/22/86, Mesa 25.2.8 (RADV), glslc 2023.8 (the compiler on PATH, which is what `stack.sh` reported until 2026-09-08; the LunarG row was built with 2026.3, see the stack note above), llama.cpp 6a1a922d2, Ollama 0.33.3, ROCm 7.14 (`bench/stack.sh`; recorded per row from now on, since 2026-09-08 with the build compiler tagged `(build)`/`(path)` and the `vkshaders` count). Raw rows: `bench/results/fb-*.jsonl`, per-turn proxy logs `bench/results/proxy/`, metrics snapshots alongside; local only except `fb-ollama-vk-core.jsonl` and the two `proxy/usage-fb-*.jsonl`, the table is the record.
 
 ## Known unknowns
 

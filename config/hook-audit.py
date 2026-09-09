@@ -18,8 +18,10 @@ Wired in config/settings.json for every tool. Two jobs:
        kill <proxy pid>). The "diagnose" skill used to suggest exactly that.
      * Write/Edit: the mangled paths this harness has produced (a flattened
        "-home-user-dir" segment, invented /tmp/claude-* files), and anything under the real
-       ~/.claude, /etc, /usr, /boot. Writes outside the working directory are allowed but
-       logged as tool_outside_cwd so they can be reviewed.
+       ~/.claude or a system root (/etc, /usr, /boot, /bin, /sbin, /lib, /proc, /sys, /opt,
+       /root, /srv, /var; only /var/tmp stays allowed, a legitimate scratch location). Writes
+       outside the working directory are allowed but logged as tool_outside_cwd so they can
+       be reviewed.
    Fails open: any exception in this hook allows the call and logs hook_exception. Env:
    CLAUDE_LOCAL_BASHGUARD=0, CLAUDE_LOCAL_PATHGUARD=0 disable each; CLAUDE_LOCAL_AUDIT=0 logs nothing.
 
@@ -153,8 +155,10 @@ def path_denial(path, cwd):
     real_claude = os.path.join(HOME, ".claude") + "/"
     if p.startswith(real_claude) or p == real_claude.rstrip("/"):
         return "this is the user's real ~/.claude configuration; the local session must never write there", False
-    for root in ("/etc/", "/usr/", "/boot/", "/bin/", "/sbin/", "/lib/", "/proc/", "/sys/"):
-        if p.startswith(root):
+    # /var/tmp is the one writable spot under these roots: a legitimate scratch location, unlike
+    # /var/lib or /var/log next to it; /opt holds the ROCm install, /root and /srv are never ours.
+    for root in ("/etc/", "/usr/", "/boot/", "/bin/", "/sbin/", "/lib/", "/proc/", "/sys/", "/opt/", "/root/", "/srv/", "/var/"):
+        if p.startswith(root) and not p.startswith("/var/tmp/"):
             return f"system path {root}; ask the user", False
     outside = bool(cwd) and not (p == cwd or p.startswith(cwd.rstrip("/") + "/")) and not p.startswith("/tmp/")
     return None, outside
