@@ -73,6 +73,10 @@
 #                             proxy checkpoints and unloads it (default 1200; 0 = off; llama-server
 #                             only; never the session's own model). Last use is shared through
 #                             run/last_use.json, so concurrent sessions do not evict each other's model.
+#   CLAUDE_LOCAL_DRAIN_ON_EXIT 1 = on close, unload the model right away (prompt cache is saved first,
+#                             so the next launch is warm) instead of waiting out CLAUDE_LOCAL_IDLE_UNLOAD;
+#                             skipped, keeping the model, if another session is still live (default 0 =
+#                             the interactive unload/leave/load-another menu).
 #   CLAUDE_LOCAL_LANES        llama-server parallel KV slots (-np, default 2). Each lane holds one
 #                             conversation's prefix cache, so a parent and its subagents/side calls
 #                             do not evict each other. Changing it rewrites the unit drop-in and
@@ -130,6 +134,7 @@ OFFLINE="${CLAUDE_LOCAL_OFFLINE:-0}"
 SNAPSHOT="${CLAUDE_LOCAL_SNAPSHOT:-1}"
 CHECKPOINT="${CLAUDE_LOCAL_CHECKPOINT:-20}"
 IDLE_UNLOAD="${CLAUDE_LOCAL_IDLE_UNLOAD:-1200}"
+DRAIN_ON_EXIT="${CLAUDE_LOCAL_DRAIN_ON_EXIT:-0}"
 EXCLUSIVE="${CLAUDE_LOCAL_EXCLUSIVE:-1}"
 PERMISSION_MODE="${CLAUDE_LOCAL_PERMISSION_MODE:-acceptEdits}"
 AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-local}"
@@ -516,7 +521,26 @@ elif [ "$CHECKPOINT" != 0 ] && declare -F backend_checkpoint >/dev/null; then ba
 
 # --- 9. Post-exit model action: unload / leave / load another ------------------
 still_loaded=$(backend_loaded_names)
-if [ -n "$still_loaded" ]; then
+if [ -n "$still_loaded" ] && [ "$DRAIN_ON_EXIT" = 1 ]; then
+  # Auto-drain on close: the prompt cache was already saved above (proxy SIGTERM /
+  # backend_checkpoint), so this just unloads to free memory; the next launch restores
+  # it warm. Never drain a model another live session is still using.
+  others=0
+  if [ -d "$CONFIG_DIR/run" ]; then
+    for d in "$CONFIG_DIR/run"/*/; do
+      p="$(basename "$d")"
+      [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" != "$$" ] && kill -0 "$p" 2>/dev/null && others=$((others+1))
+    done
+  fi
+  if [ "$others" -eq 0 ]; then
+    for m in ${still_loaded//,/ }; do say "Draining ${m} (prompt cache saved; memory freed)..."; backend_unload "$m"; done
+    remaining=$(backend_loaded_names)
+    [ -n "$remaining" ] && warn "Still loaded: ${remaining}" || say "Memory freed."
+    ev drain_on_exit info models="$still_loaded"
+  else
+    say "Leaving ${still_loaded} loaded: ${others} other session(s) live."
+  fi
+elif [ -n "$still_loaded" ]; then
   printf '\033[1;36mmodels in memory:\033[0m %s  (u)nload  load (a)nother  [Enter=leave]  ' "$still_loaded" >&2
   read -r ans
   case "${ans:-}" in
