@@ -73,6 +73,11 @@
 #                             proxy checkpoints and unloads it (default 1200; 0 = off; llama-server
 #                             only; never the session's own model). Last use is shared through
 #                             run/last_use.json, so concurrent sessions do not evict each other's model.
+#   CLAUDE_LOCAL_LANES        llama-server parallel KV slots (-np, default 2). Each lane holds one
+#                             conversation's prefix cache, so a parent and its subagents/side calls
+#                             do not evict each other. Changing it rewrites the unit drop-in and
+#                             restarts llama-server on the next launch when no other session is live;
+#                             CTX_SIZE tracks lanes*131072. Memory ~ lanes*18GB KV + 21GB + 16GB cache.
 #   CLAUDE_LOCAL_EXCLUSIVE    1 = at start, evict whatever the *other* backend has loaded (Ollama
 #                             models via keep_alive 0; llama-server presets after a checkpoint) so
 #                             two servers never share the GPU pool (default 1); 0 = leave them
@@ -81,6 +86,9 @@
 #                             output (default 1); 0 = fetch anything
 #   CLAUDE_LOCAL_PROXY_DEBUG  1 = proxy also logs request params/tool count/system size;
 #                             2 = also dump every request body to run/<pid>/requests/
+#   capture-next (flag file)  `touch ~/.claude-local/capture-next` arms ONE session to dump request
+#                             bodies (as PROXY_DEBUG=2) then deletes the flag; for diagnosing
+#                             prefix-cache divergence (usage.jsonl div=system[N]). One-shot, self-disarming.
 #   CLAUDE_LOCAL_CLAUDE_DEBUG 1 = Claude Code writes its own debug log (API attempts, MCP, hooks) to
 #                             run/<pid>/claude-debug.log via --debug-file (default 1; the TUI is unchanged)
 #   CLAUDE_LOCAL_LOG_DIR      where the structured event log and session archives go
@@ -152,6 +160,44 @@ BACKEND_FILE="$CONFIG_DIR/backend-${BACKEND}.sh"
 [ -r "$BACKEND_FILE" ] || { err "no backend adapter at $BACKEND_FILE"; exit 1; }
 # shellcheck source=/dev/null
 . "$BACKEND_FILE"
+
+# --- 0b. Lanes (parallel KV slots) --------------------------------------------
+# CLAUDE_LOCAL_LANES independent slots so a parent and its subagents/side calls do
+# not evict each other's prefix cache. Lanes (-np) are a server-wide setting fixed
+# at llama-server start, so changing the count rewrites the unit drop-in and restarts
+# the service -- but ONLY when no other session is live, since a restart kills any
+# in-flight turn. Per-lane context stays 131072 (CTX_SIZE = lanes * 131072).
+LANES="${CLAUDE_LOCAL_LANES:-}"
+LS_DROPIN="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/llama-server.service.d/10-claude-local.conf"
+if [ "$BACKEND" = llamaserver ] && [ -n "$LANES" ] && [ -f "$LS_DROPIN" ]; then
+  if ! [[ "$LANES" =~ ^[1-9][0-9]*$ ]]; then
+    warn "CLAUDE_LOCAL_LANES=$LANES is not a positive integer; ignoring."
+  else
+    [ "$LANES" -gt 4 ] && warn "CLAUDE_LOCAL_LANES=$LANES: ~lanes*18GB KV + 21GB weights + 16GB cache; run claude-local-doctor to check for swap."
+    cur_np="$(grep -oE 'LLAMA_ARG_N_PARALLEL=[0-9]+' "$LS_DROPIN" | grep -oE '[0-9]+$')"
+    if [ "${cur_np:-1}" != "$LANES" ]; then
+      others=0
+      if [ -d "$CONFIG_DIR/run" ]; then
+        for d in "$CONFIG_DIR/run"/*/; do
+          p="$(basename "$d")"
+          [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" != "$$" ] && kill -0 "$p" 2>/dev/null && others=$((others+1))
+        done
+      fi
+      want_ctx=$(( LANES * 131072 ))
+      if ! backend_up || [ "$others" -eq 0 ]; then
+        say "Reconfiguring llama-server: ${cur_np:-1} -> ${LANES} lanes (ctx ${want_ctx}); restarting the unit."
+        sed -i -e "s/^Environment=LLAMA_ARG_N_PARALLEL=.*/Environment=LLAMA_ARG_N_PARALLEL=${LANES}/" \
+               -e "s/^Environment=LLAMA_ARG_CTX_SIZE=.*/Environment=LLAMA_ARG_CTX_SIZE=${want_ctx}/" "$LS_DROPIN"
+        systemctl --user daemon-reload 2>/dev/null || true
+        systemctl --user is-active --quiet "${_ls_unit:-llama-server.service}" \
+          && systemctl --user restart "${_ls_unit:-llama-server.service}" 2>/dev/null || true
+        ev lanes_reconfigured info old="${cur_np:-1}" new="$LANES" ctx="$want_ctx"
+      else
+        warn "llama-server has ${cur_np:-1} lane(s), CLAUDE_LOCAL_LANES=$LANES: ${others} other session(s) live, not restarting. Retry when idle, or: sed -i 's/N_PARALLEL=.*/N_PARALLEL=${LANES}/;s/CTX_SIZE=.*/CTX_SIZE=${want_ctx}/' \"$LS_DROPIN\" && systemctl --user daemon-reload && systemctl --user restart llama-server.service"
+      fi
+    fi
+  fi
+fi
 
 # --- 1. Ensure the server is reachable -----------------------------------------
 if ! backend_up; then
@@ -288,11 +334,25 @@ LEDGER
 # fit the window, so autocompact = context - max output - margin. Claude's floor
 # is 100K, so the server needs >= 100K + max output + 2K to be safe.
 CTX=$(backend_context_length "$MODEL")
+# CTX_SIZE is the TOTAL context across lanes; a single conversation gets one lane
+# (CTX / N_PARALLEL). Size autocompact to the PER-LANE context so a prompt never
+# overflows its slot and gets front-truncated. Read the server's lane count from the
+# drop-in (authoritative); dividing is safe either way (if the backend already reports
+# per-seq context, dividing just compacts a little earlier -- never a truncation).
+SERVER_LANES=1
+if [ "$BACKEND" = llamaserver ] && [ -f "${LS_DROPIN:-}" ]; then
+  SERVER_LANES="$(grep -oE 'LLAMA_ARG_N_PARALLEL=[0-9]+' "$LS_DROPIN" | grep -oE '[0-9]+$')"
+  SERVER_LANES="${SERVER_LANES:-1}"
+fi
+PER_LANE_CTX="$CTX"
+if [ -n "$CTX" ] && [ "${SERVER_LANES:-1}" -gt 1 ] 2>/dev/null; then
+  PER_LANE_CTX=$(( CTX / SERVER_LANES ))
+fi
 CLAUDE_FLAGS=()
 if [ -n "${CLAUDE_LOCAL_AUTOCOMPACT:-}" ]; then
   AUTOCOMPACT="$CLAUDE_LOCAL_AUTOCOMPACT"
-elif [ -n "$CTX" ]; then
-  AUTOCOMPACT=$(( CTX - MAX_OUTPUT - 2048 ))
+elif [ -n "$PER_LANE_CTX" ]; then
+  AUTOCOMPACT=$(( PER_LANE_CTX - MAX_OUTPUT - 2048 ))
 else
   AUTOCOMPACT=""
 fi
@@ -341,11 +401,23 @@ fi
 # --- 7. Usage proxy (per-turn cache hit / tok/s for the statusline) ------------
 CLAUDE_BASE_URL="$BASE_URL"
 if [ "$USE_PROXY" = "1" ]; then
+  # One-shot request capture: `touch ~/.claude-local/capture-next` arms a SINGLE session
+  # to dump every Messages request body to run/<pid>/requests/ (archived to
+  # logs/sessions/<...>/requests/ on exit), then disarms itself. Use it to diagnose
+  # prefix-cache divergence (usage.jsonl div=system[N]) by diffing consecutive request
+  # bodies. A diagnostic, not a steady-state default — hence one-shot, not a persistent env.
+  PROXY_DEBUG_EFF="${CLAUDE_LOCAL_PROXY_DEBUG:-}"
+  if [ -f "$CONFIG_DIR/capture-next" ]; then
+    PROXY_DEBUG_EFF=2
+    rm -f "$CONFIG_DIR/capture-next"
+    say "Request capture ARMED (one-shot): bodies -> $SESSION_DIR/requests/, archived to logs/sessions/ on exit. Now disarmed."
+    ev capture_armed info session_dir="$SESSION_DIR"
+  fi
   rm -f "$SESSION_DIR/proxy_port"
   PROXY_PORT="$PROXY_PORT" PROXY_PORT_FILE="$SESSION_DIR/proxy_port" UPSTREAM_PORT="$PORT" \
     USAGE_LOG="$SESSION_DIR/usage.jsonl" \
     PROXY_BACKEND="$BACKEND" PROXY_CHECKPOINT_S="$CHECKPOINT" PROXY_IDLE_UNLOAD_S="$IDLE_UNLOAD" PROXY_STATE_DIR="$RUN_ROOT" SLOTS_DIR="$CONFIG_DIR/slots" \
-    PROXY_SAMPLING="${CLAUDE_LOCAL_SAMPLING:-}" PROXY_DEBUG="${CLAUDE_LOCAL_PROXY_DEBUG:-}" PROXY_SESSION_MODEL="$MODEL" \
+    PROXY_SAMPLING="${CLAUDE_LOCAL_SAMPLING:-}" PROXY_DEBUG="$PROXY_DEBUG_EFF" PROXY_SESSION_MODEL="$MODEL" \
     python3 "$CONFIG_DIR/proxy.py" 2>> "$SESSION_DIR/proxy.log" &
   PROXY_PID=$!
   # The proxy binds its own port (atomic claim) and reports it via the port file.
