@@ -370,6 +370,9 @@ fi
 # Export operational state so the model can read its own configuration at runtime.
 export CLAUDE_LOCAL_BACKEND="$BACKEND"
 export CLAUDE_LOCAL_TOOLS="${TOOLS}"
+# Mark the session interactive only when a human is actually on the TTY, so the
+# safety guard can deny (not stall on) outward-facing prompts in headless runs.
+if [ -t 0 ] && [ -t 1 ]; then export CLAUDE_LOCAL_INTERACTIVE=1; fi
 export CLAUDE_LOCAL_OFFLINE="$OFFLINE"
 export CLAUDE_LOCAL_WEBSEARCH="$WEBSEARCH"
 export CLAUDE_LOCAL_URLGUARD="${CLAUDE_LOCAL_URLGUARD:-1}"

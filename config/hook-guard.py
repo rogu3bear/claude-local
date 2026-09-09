@@ -89,6 +89,20 @@ def allow():
     sys.exit(0)
 
 
+INTERACTIVE = os.environ.get("CLAUDE_LOCAL_INTERACTIVE") == "1"
+
+
+def ask(reason):
+    """Ask a human when a human is driving; otherwise DENY. An outward-facing
+    prompt has no answerer in a cron/print/autonomous run, so denying is the
+    safe resolution — the action can be done deliberately in an interactive
+    session."""
+    if INTERACTIVE:
+        emit("ask", reason)
+    emit("deny", reason + " [blocked: no interactive session to confirm; "
+                          "run it yourself or from an interactive terminal]")
+
+
 def project_dir():
     return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
 
@@ -192,11 +206,11 @@ def main():
             emit("deny", f"Blocked: shell redirect into {what} ({mm.group(1)}).")
 
     if PUBLISH_CMD_RE.search(scmd):
-        emit("ask", "This publishes/releases outward. Confirm before it goes out.")
+        ask("This publishes/releases outward. Confirm before it goes out.")
 
     if push_needs_confirm(scmd):
-        emit("ask", "This pushes to main/master. Confirm before publishing to the "
-                    "shared branch (or push a feature branch).")
+        ask("This pushes to main/master. Confirm before publishing to the "
+            "shared branch (or push a feature branch).")
 
     allow()
 

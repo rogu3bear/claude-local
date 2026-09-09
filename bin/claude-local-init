@@ -92,4 +92,18 @@ SETTINGS
   echo "  write  .claude/settings.json"
 fi
 
+# Never commit secrets or captured traffic.
+if ! grep -q "claude-local-init: secrets" .gitignore 2>/dev/null; then
+  {
+    echo ""
+    echo "# claude-local-init: secrets and captures — never commit"
+    echo ".env"
+    echo ".env.*"
+    echo "*sessions*.yaml"
+    echo "!*sessions.example.yaml"
+    echo "data/"
+  } >> .gitignore
+  echo "  write  .gitignore (secrets: .env*, *sessions*.yaml, data/)"
+fi
+
 echo "done. next: run 'bash .claude/scripts/verify.sh' to confirm green, then 'bash .claude/scripts/heal.sh mark-green'."

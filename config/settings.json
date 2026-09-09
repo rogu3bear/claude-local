@@ -100,6 +100,17 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude-local/hook-session-start.py\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
