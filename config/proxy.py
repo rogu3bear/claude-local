@@ -402,6 +402,17 @@ def fold_system_messages(req: dict) -> bool:
         elif isinstance(c, str) and "<total_tokens>" in c:     # inline in a plain-string message
             m["content"] = strip_volatile(c)                     # the text around it stays; never drop the message
             changed = True
+    # Drop ephemeral system-reminder blocks from the top-level system array (they toggle and
+    # bust the cache). Runs unconditionally, before the role:system early-return below.
+    sys_blocks = req.get("system")
+    if isinstance(sys_blocks, list):
+        kept_sys = [b for b in sys_blocks
+                    if not (isinstance(b, dict) and b.get("type") == "text"
+                            and is_ephemeral_reminder(b.get("text", "")))]
+        if len(kept_sys) != len(sys_blocks):
+            req["system"] = kept_sys
+            changed = True
+            _note_ephemeral_stripped()
     if not any(isinstance(m, dict) and m.get("role") == "system" for m in msgs):
         return changed
     system = req.get("system")
@@ -443,6 +454,31 @@ def strip_volatile(text):
               hint="Claude Code sent its per-turn <total_tokens> reminder; stripped so the prefix cache survives. "
                    "Set CLAUDE_CODE_TOTAL_TOKENS_REMINDER=0 (the launcher does) to stop it at the source.")
     return out
+
+
+# Ephemeral system-reminder BLOCKS (whole blocks, not inline counters like <total_tokens>)
+# that Claude Code injects into the top-level `system` array and toggles on and off. Each
+# appearance/removal changes the cached prefix and forces a full re-prefill of the turn
+# (measured 2026-09-09: the "task tools" nudge cost a 30s TTFT / 27% cache turn mid-session,
+# same conversation, no subagent). --exclude-dynamic-system-prompt-sections does not remove
+# these, so the proxy drops them to keep the prefix byte-stable.
+EPHEMERAL_REMINDER_RES = [
+    re.compile(r"task tools haven't been used recently", re.I),
+]
+_ephemeral_seen = 0
+
+
+def is_ephemeral_reminder(text):
+    return any(rx.search(text or "") for rx in EPHEMERAL_REMINDER_RES)
+
+
+def _note_ephemeral_stripped():
+    global _ephemeral_seen
+    _ephemeral_seen += 1
+    if _ephemeral_seen == 1:
+        event("volatile_system_stripped", "info", tag="task_reminder",
+              hint="Claude Code injected its 'task tools not used recently' nudge as a system block; "
+                   "it toggles on/off and busts the prefix cache every time, so the proxy strips it.")
 
 
 def hosted(name):
